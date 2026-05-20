@@ -26,7 +26,7 @@ def calculate_1d_music(v_matrices):
     # Averages across the subcarrier dimension (axis=1)
     v_spatial = np.mean(v_matrices, axis=1) # New Shape: (Packets, N_tx, N_rx)
     
-    # Isolate the primary spatial stream for line-of-sight tracking
+    #  Isolate the dominant principal component (strongest multipath trajectory) for spatial tracking
     # We take all packets, all Tx antennas, but only the 0th spatial stream
     h_matrix = v_spatial[:, :, 0] # New Shape: (Packets, N_tx)
     
