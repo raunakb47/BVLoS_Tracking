@@ -85,7 +85,7 @@ if __name__ == "__main__":
         clear_terminal()
         
         print("==================================================")
-        print(" ISAC PROMISCUOUS AoA BEARING RESOLVER")
+        print(" AoA BEARING RESOLVER")
         print("==================================================")
         print(f" Temporal Chunk : {matrix_file.split('/')[-1]}")
         print(f" Discovered     : {len(environmental_data)} radiating state(s)")
