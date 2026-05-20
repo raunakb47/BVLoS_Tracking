@@ -32,7 +32,7 @@ Ensure the following system packages and Python libraries are installed before e
 * **Python Environment:** `numpy`, `pyshark`
 * **Hardware:** A network interface card capable of Monitor Mode (e.g., Alfa AWUS036ACS).
 
-## 🚦 Quick Start Guide
+## ▶️ Quick Start Guide
 
 ### 1. Configuration
 Define your capture parameters, channel bandwidth, and physical interface in the master configuration file:
