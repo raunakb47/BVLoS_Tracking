@@ -21,7 +21,7 @@ A passive, hardware-agnostic framework for Beyond Visual Line of Sight (BVLoS) e
 └── BVLoS_Live_Tracker/          # Main Application: Tracking Architecture
     ├── config.env               # Master configuration file (Interface, Protocol, Timing)
     ├── 0_replay_pcap.sh         # Offline simulation engine for historical PCAPs
-    ├── 1_capture.sh             # Live physical capture daemon (requires Monitor Mode capable WiFi-5+ Adapter)
+    ├── 1_capture.sh             # Live physical capture daemon (requires Monitor Mode hardware)
     ├── 2_watchdog.sh            # inotifywait event daemon bridging capture to extraction
     └── 3_bvlos_tracker.py       # 1D-MUSIC eigenvalue decomposition and UI output
 ```
