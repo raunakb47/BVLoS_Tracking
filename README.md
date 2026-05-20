@@ -8,7 +8,7 @@ A passive, hardware-agnostic framework for Beyond Visual Line of Sight (BVLoS) e
 * **High-Resolution Codebooks:** Extended Givens Rotation math supporting highly complex array configurations up to **4x4** and **4x3**, scaling seamlessly down to **2x1**.
 * **Real-Time Continuous Pipeline:** A modular, bash-driven asynchronous pipeline that mimics real-time radar processing using sliding temporal capture windows.
 
-## 📁 Repository Structure
+## 📁 Workflow Structure
 ```text
 /workspace/
 │
