@@ -3,10 +3,10 @@
 A passive, hardware-agnostic framework for Beyond Visual Line of Sight (BVLoS) environmental sensing and spatial bearing resolution. This architecture leverages IEEE 802.11ac Beamforming Feedback Information (BFI) to mathematically resolve the Angle of Arrival (AoA) of multiple unassociated Wi-Fi targets simultaneously using the MUSIC algorithm.
 
 ## 🚀 Core Features
-* **Environmental Sensing:** Operates completely blindly. Captures and maps every radiating IEEE 802.11 entity in the environment without requiring target MAC addresses.
-* **Dynamic MIMO Auto-Detection:** Automatically reads matrix dimensions from PCAP headers and groups targets into unique `MAC_Config` buckets to prevent dimension-mismatch crashes when devices shape-shift to save power.
+* **Environmental Sensing:** Captures and maps entities in the environment from BFI packets.
+* **Dynamic MIMO Auto-Detection:** Automatically reads matrix dimensions from PCAP headers and groups targets into unique `MAC_Config` buckets to prevent dimension-mismatch crashes when devices change MIMO config.
 * **High-Resolution Codebooks:** Extended Givens Rotation math supporting highly complex array configurations up to **4x4** and **4x3**, scaling seamlessly down to **2x1**.
-* **Real-Time Continuous Pipeline:** A modular, bash-driven asynchronous pipeline that mimics real-time radar processing using sliding temporal capture windows.
+* **Real-Time Continuous Pipeline:** A modular, asynchronous pipeline that performs localization using sliding temporal capture windows.
 
 ## 📁 Workflow Structure
 ```text
