@@ -1,21 +1,33 @@
 #!/bin/bash
 # ==============================================================================
 # Script: 1_capture.sh
-# Purpose: Interfaces directly with the physical NIC (Alfa AWUS036ACS) to ingest 
-#          raw 802.11 RF frames. Segments the continuous live stream into discrete, 
-#          manageable PCAP files for the extraction pipeline to process.
+# Purpose: Interfaces directly with the physical NIC to ingest raw 802.11 RF frames.
+#          Assumes the interface has already been locked to the correct target 
+#          frequency and VHT bandwidth by an external reconnaissance tool.
 # ==============================================================================
 
-# Ingest global tracking parameters (CAPTURE_INTERFACE, CHUNK_TIME)
+# Ingest global tracking parameters
 source ./config.env
 
-# Define the target directory where the watchdog daemon is listening
 WATCH_DIR="./live_chunks"
-
-# Ensure the pipeline ingestion directory exists
 mkdir -p $WATCH_DIR
 
-echo "[*] Initializing environmental sensing on ${CAPTURE_INTERFACE}..."
+echo "[*] Initializing RF packet ingestion on ${CAPTURE_INTERFACE}..."
+
+# ------------------------------------------------------------------------------
+# PRE-FLIGHT HARDWARE AUDIT
+# Queries the netlink interface to verify the external frequency lock.
+# If this does not explicitly say "80MHz" or "160MHz" alongside the channel, 
+# your downstream BFI extraction will fail due to payload truncation.
+# ------------------------------------------------------------------------------
+ACTUAL_FREQ=$(iw dev $CAPTURE_INTERFACE info | grep -E "channel|width")
+if [ -z "$ACTUAL_FREQ" ]; then
+    echo "[!] WARNING: Could not verify channel lock state. Proceeding blindly."
+else
+    echo "[*] Verified Interface State:"
+    echo "$ACTUAL_FREQ"
+fi
+
 echo "[*] Temporal segmentation resolution: ${CHUNK_TIME} seconds."
 
 # ------------------------------------------------------------------------------
