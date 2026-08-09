@@ -1,32 +1,25 @@
 #!/bin/bash
 # ==============================================================================
-# Script: 1_capture.sh
-# Purpose: Interfaces directly with the physical NIC to ingest raw 802.11 RF frames.
+# Module: 1_Stage1_Capture.sh
+# Purpose: Interfaces directly with the physical NIC to record raw 802.11 RF frames.
 #          Assumes the interface has already been locked to the correct target 
-#          frequency and VHT bandwidth by an external reconnaissance tool.
+#          frequency and VHT bandwidth.
 # ==============================================================================
 
-# Ingest global tracking parameters
+
 source ./config.env
 
-WATCH_DIR="./live_chunks"
 mkdir -p $WATCH_DIR
 
-echo "[*] Initializing RF packet ingestion on ${CAPTURE_INTERFACE}..."
+echo "[*] Stage 1 (Capture): Initializing RF ingestion on ${CAPTURE_INTERFACE}"
 
 # ------------------------------------------------------------------------------
-# PRE-FLIGHT HARDWARE AUDIT
-# Queries the netlink interface to verify the external frequency lock.
+# Query the netlink interface to verify the external frequency lock.
 # If this does not explicitly say "80MHz" or "160MHz" alongside the channel, 
-# your downstream BFI extraction will fail due to payload truncation.
+# BFI extraction will fail due to payload truncation.
 # ------------------------------------------------------------------------------
-ACTUAL_FREQ=$(iw dev $CAPTURE_INTERFACE info | grep -E "channel|width")
-if [ -z "$ACTUAL_FREQ" ]; then
-    echo "[!] WARNING: Could not verify channel lock state. Proceeding blindly."
-else
-    echo "[*] Verified Interface State:"
-    echo "$ACTUAL_FREQ"
-fi
+ACTUAL_FREQ=$(iw dev "$CAPTURE_INTERFACE" info | grep -E "channel|width")
+echo "[*] Interface State: $ACTUAL_FREQ"
 
 echo "[*] Temporal segmentation resolution: ${CHUNK_TIME} seconds."
 
@@ -46,4 +39,5 @@ echo "[*] Temporal segmentation resolution: ${CHUNK_TIME} seconds."
 # -w .../chunk_%S.pcap  : The output write path. '%S' appends the current seconds 
 #                         timestamp to the filename for unique chronometric tracking.
 # ------------------------------------------------------------------------------
-sudo tcpdump -i $CAPTURE_INTERFACE -I -s 0 -G $CHUNK_TIME -W 60 -w $WATCH_DIR/chunk_%S.pcap
+#sudo tcpdump -i $CAPTURE_INTERFACE -I -s 0 -G $CHUNK_TIME -W 60 -w $WATCH_DIR/chunk_%S.pcap
+sudo tcpdump -i "$CAPTURE_INTERFACE" -I -s 0 -G "$CHUNK_TIME" -W 60 -w "$WATCH_DIR/chunk_%S.pcap"
