@@ -1,6 +1,6 @@
 # BVLoS Tracking Framework
 
-A passive, hardware-agnostic framework for Beyond Visual Line of Sight (BVLoS)environmental sensing, human occupancy detection, and spatial tracking. This architecture leverages IEEE 802.11ac/ax Beamforming Feedback Information (BFI) to extract positional information without requiring a pre-measured grid or physical line-of-sight to the network infrastructure.
+A passive, hardware-agnostic framework for Beyond Visual Line of Sight (BVLoS) environmental sensing, human occupancy detection, and spatial tracking. This architecture leverages IEEE 802.11ac/ax Beamforming Feedback Information (BFI) to extract positional information without requiring a pre-measured grid or physical line-of-sight to the network infrastructure.
 
 The entire workflow first goes through the modified Wi-BFI repository to get the extracted angles and reconstructed V-matrices, then proceeds to the BVLoS tracker.
 
