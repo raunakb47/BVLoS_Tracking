@@ -71,6 +71,7 @@ def dispatcher(sanitized_file, out_json, state_file=None):
         packets = v_matrices.shape[0]
 
         ap_aod = None
+        aod_confidence = None
 
         if nt < 2:
             routing, algo_name = "KPVT_ONLY", "NONE"
@@ -80,7 +81,13 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             elif ke < KE_THRESHOLD: algo_name = "SPOTFI"
             else: algo_name = "RES_2D_MUSIC" if nt >= 3 else "CA_ESPRIT"
 
-            ap_aod = spatial_algos.SSE_REGISTRY[algo_name](v_matrices, nt)
+            # Every SSE_REGISTRY entry reports its own confidence alongside the
+            # angle: a HIGH-confidence estimate means the array's eigenvalue
+            # spectrum actually looks like one dominant path (the assumption
+            # the underlying math relies on); LOW means a second comparably
+            # strong path was present, so the angle is likely a multipath
+            # blend rather than the true AoD. See 3_1_Spatial_Algorithms.py.
+            ap_aod, aod_confidence = spatial_algos.SSE_REGISTRY[algo_name](v_matrices, nt)
 
         results[bucket_key] = {
             "client_mac": client_mac,
@@ -90,6 +97,7 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             "algorithm": algo_name,
             "kinematic_energy": ke,
             "ap_aod": ap_aod,
+            "aod_confidence": aod_confidence,
             "client_rssi": client_rssi
         }
 

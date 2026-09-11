@@ -96,7 +96,15 @@ def stage4_inference(stage3_json, state_file=None):
             "UI_Render": {}
         }
 
-        if data["routing"] == "KPVT_AND_SSE":
+        # A LOW-confidence angle (3_1_Spatial_Algorithms._signal_subspace_confidence
+        # detected a second comparably-strong path, so rank-1 does not hold this
+        # chunk) is deliberately NOT turned into a position update: emitting one
+        # anyway would silently blend two propagation paths into a single
+        # confident-looking point. The bucket is left out of seen_bucket_keys so
+        # the coast/hold logic below treats this chunk exactly like a chunk with
+        # no packets at all -- KPVT's occupancy read is still reported, SSE just
+        # sits this one out.
+        if data["routing"] == "KPVT_AND_SSE" and data.get("aod_confidence") != "LOW":
             seen_bucket_keys.append(bucket)
             ap_mac = data["ap_mac"]
             ap_info = estimate_ap_baseline(ap_mac)

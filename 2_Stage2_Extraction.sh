@@ -22,10 +22,12 @@ do
         python3 2_1_Temporal_Sanitizer.py "$RAW_VMATRIX" "$TDT_MS" >> "$LOG_FILE" 2>&1
         
         if [ -f "$SANITIZED" ]; then
-            # STATE_FILE carries per-bucket sliding-window and track-continuity
-            # state across this chunk's Stage 3/4 subprocesses and the next.
+            # STATE_FILE (Stage 3's sliding window) and TRACK_STATE_FILE (Stage 4's
+            # position/track continuity) are deliberately separate files -- see
+            # config.env -- so that Stage 4 dropping a stale track can never
+            # clobber Stage 3's in-progress window data for that same bucket.
             python3 3_Stage3_Localization.py "$SANITIZED" "$STAGE3_OUT" "$STATE_FILE"
-            python3 4_Stage4_Inference.py "$STAGE3_OUT" "$STATE_FILE"
+            python3 4_Stage4_Inference.py "$STAGE3_OUT" "$TRACK_STATE_FILE"
             rm -f "$RAW_VMATRIX" "$RAW_ANGLES" "$SANITIZED"
         fi
     fi

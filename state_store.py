@@ -76,6 +76,16 @@ def touch_buckets(state, seen_bucket_keys, coast_limit=DEFAULT_COAST_LIMIT):
         if bucket_key in seen_bucket_keys:
             surviving.append(bucket_key)
             continue
+        if bucket_state["last_seen_ts"] is None:
+            # This entry exists only because Stage 3 created it to track a
+            # sliding window (see push_window_sample); it has never had an
+            # accepted position fix (mark_fix was never called for it -- e.g.
+            # a KPVT_ONLY bucket, or one whose SSE confidence has been LOW
+            # every chunk so far). There is nothing to coast/hold, so it is
+            # dropped from state rather than fed into mark_missed(), which
+            # would otherwise "coast" a track that was never actually confirmed.
+            del state[bucket_key]
+            continue
         still_alive = mark_missed(bucket_state, coast_limit)
         if still_alive:
             surviving.append(bucket_key)
