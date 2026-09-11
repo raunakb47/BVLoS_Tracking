@@ -7,10 +7,15 @@ on the positive Y-axis.
 import sys
 import json
 import os
+import time
 import numpy as np
+from importlib import import_module
+
+state_store = import_module('state_store')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
+TRACK_COAST_LIMIT = int(os.getenv("TRACK_COAST_LIMIT", state_store.DEFAULT_COAST_LIMIT))
 
 # Monitor Card is ALWAYS the center of the grid
 MC_COORDS = np.array([0.0, 0.0])
@@ -68,39 +73,42 @@ def calculate_dynamic_cep(ke, is_mobile):
     kinematic_penalty = min(ke * 10, 2.0)
     return round(base_error + mobility_penalty + kinematic_penalty, 2)
 
-def stage4_inference(stage3_json):
+def stage4_inference(stage3_json, state_file=None):
     # Perform channel to frequency translation once upon execution
     operating_freq = channel_to_frequency(WIFI_CHANNEL)
 
     with open(stage3_json, 'r') as f:
         results = json.load(f)
-        
+
+    state = state_store.load_state(state_file) if state_file else {}
     dashboard_state = {"Occupancy": 0, "Entities": []}
-    
+    seen_bucket_keys = []
+
     for bucket, data in results.items():
         ke = data["kinematic_energy"]
         is_occupied = ke > KE_THRESHOLD
         if is_occupied: dashboard_state["Occupancy"] += 1
-        
+
         entity = {
             "Mac": data["client_mac"],
             "State": "MOVING" if is_occupied else "STATIC",
             "Kinetic_Energy": round(ke, 4),
             "UI_Render": {}
         }
-        
+
         if data["routing"] == "KPVT_AND_SSE":
+            seen_bucket_keys.append(bucket)
             ap_mac = data["ap_mac"]
             ap_info = estimate_ap_baseline(ap_mac)
             ap_pos = ap_info["pos"]
-            
+
             # Pass the derived frequency into the intersection engine
             client_coords, mc_distance = ray_circle_intersection(
                 ap_pos, MC_COORDS, data["ap_aod"], data["client_rssi"], operating_freq
             )
-            
+
             cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"])
-            
+
             entity["UI_Render"] = {
                 "Tracking_Type": "Ray_Circle_Intersection",
                 "Algorithm": data["algorithm"],
@@ -109,14 +117,56 @@ def stage4_inference(stage3_json):
                 "Client_Coords": [round(client_coords[0], 2), round(client_coords[1], 2)],
                 "Uncertainty_Radius": cep_radius,
                 "Vectors": {
-                    "AP_AoD": round(data["ap_aod"], 1), 
+                    "AP_AoD": round(data["ap_aod"], 1),
                     "MC_Distance_m": round(mc_distance, 2)
-                }
+                },
+                "Track_Status": "CONFIRMED"
             }
-                
+
+            # Remember this fix so a subsequent chunk with zero packets for this
+            # bucket can still render a (aging) marker instead of the client
+            # abruptly disappearing from the map.
+            if state_file:
+                state_store.mark_fix(state_store.get_bucket(state, bucket), client_coords, data["ap_aod"])
+
         dashboard_state["Entities"].append(entity)
+
+    # BFI arrives on whatever cadence the AP happens to sound its clients at;
+    # a bucket producing zero packets for a chunk or two is normal, not a
+    # dropout. Rather than let such a client vanish from the map (or crash on
+    # a KeyError further down the pipeline), hold it at its last confirmed
+    # position -- the standard radar "coast" pattern: predict/hold across
+    # missed detections, drop the track only after TRACK_COAST_LIMIT
+    # consecutive misses. The UI is expected to render a COASTING entity
+    # visibly stale (e.g. greyed out) using Age_Seconds, and to snap it back
+    # to a solid marker the moment a fresh CONFIRMED fix reappears.
+    if state_file:
+        surviving = state_store.touch_buckets(state, seen_bucket_keys, coast_limit=TRACK_COAST_LIMIT)
+        for bucket_key in surviving:
+            if bucket_key in seen_bucket_keys:
+                continue
+            bucket_state = state[bucket_key]
+            if bucket_state["track_status"] != "COASTING":
+                continue
+            client_mac, ap_mac, pkt_config = bucket_key.split('_')
+            age_s = time.time() - bucket_state["last_seen_ts"]
+            dashboard_state["Entities"].append({
+                "Mac": client_mac,
+                "State": "STALE",
+                "Kinetic_Energy": None,
+                "UI_Render": {
+                    "Tracking_Type": "Ray_Circle_Intersection",
+                    "Anchor_MAC": ap_mac,
+                    "Client_Coords": bucket_state["last_position"],
+                    "Vectors": {"AP_AoD": bucket_state["last_ap_aod"]},
+                    "Track_Status": "COASTING",
+                    "Age_Seconds": round(age_s, 1)
+                }
+            })
+        state_store.save_state(state_file, state)
 
     print(json.dumps(dashboard_state, indent=2))
 
 if __name__ == "__main__":
-    stage4_inference(sys.argv[1])
+    state_arg = sys.argv[2] if len(sys.argv) > 2 else None
+    stage4_inference(sys.argv[1], state_arg)

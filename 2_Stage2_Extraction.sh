@@ -22,9 +22,10 @@ do
         python3 2_1_Temporal_Sanitizer.py "$RAW_VMATRIX" "$TDT_MS" >> "$LOG_FILE" 2>&1
         
         if [ -f "$SANITIZED" ]; then
-            # NEW_PCAP is passed to Inference for AP distance (RSSI) extraction
-            python3 3_Stage3_Localization.py "$SANITIZED" "$STAGE3_OUT"
-            python3 4_Stage4_Inference.py "$STAGE3_OUT" "$NEW_PCAP"
+            # STATE_FILE carries per-bucket sliding-window and track-continuity
+            # state across this chunk's Stage 3/4 subprocesses and the next.
+            python3 3_Stage3_Localization.py "$SANITIZED" "$STAGE3_OUT" "$STATE_FILE"
+            python3 4_Stage4_Inference.py "$STAGE3_OUT" "$STATE_FILE"
             rm -f "$RAW_VMATRIX" "$RAW_ANGLES" "$SANITIZED"
         fi
     fi
