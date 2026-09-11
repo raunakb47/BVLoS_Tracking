@@ -116,6 +116,22 @@ def windowed_rssi(bucket_state):
     return np.concatenate([w[2] for w in bucket_state["window"]], axis=0)
 
 
+def push_cfar_reference(bucket_state, kinematic_energy, max_cells):
+    """
+    Append this chunk's kinematic-energy value to the bucket's OS-CFAR
+    reference history and trim to max_cells. Unlike push_window_sample (which
+    feeds algorithm inputs), this stores algorithm OUTPUT: the running record
+    of "what did this bucket's kinematic energy look like recently" that
+    3_2_Kinematic_Tracker.py's OS-CFAR detector treats as its noise-floor
+    reference window (see Rohling 1983 -- the order-statistic form
+    deliberately does not need this history to already exclude past
+    detections, which is why every chunk's value is pushed unconditionally).
+    """
+    bucket_state["cfar_reference"].append(float(kinematic_energy))
+    if len(bucket_state["cfar_reference"]) > max_cells:
+        bucket_state["cfar_reference"] = bucket_state["cfar_reference"][-max_cells:]
+
+
 def mark_fix(bucket_state, position, ap_aod):
     """Record a fresh, accepted SSE position fix and reset track staleness."""
     bucket_state["last_position"] = [float(position[0]), float(position[1])]

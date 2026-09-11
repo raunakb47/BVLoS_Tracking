@@ -19,22 +19,17 @@ import sys
 import os
 import json
 import numpy as np
-from sklearn.decomposition import PCA
 from importlib import import_module
 
 spatial_algos = import_module('3_1_Spatial_Algorithms')
 state_store = import_module('state_store')
+kinematic_tracker = import_module('3_2_Kinematic_Tracker')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 STARVED_LIMIT = int(os.getenv("PACKET_STARVATION_LIMIT", 15))
 WINDOW_CHUNKS = int(os.getenv("WINDOW_CHUNKS", state_store.DEFAULT_WINDOW_CHUNKS))
-
-def kpvt_module(v_matrices):
-    t_steps = v_matrices.shape[0]
-    v_abs = np.abs(v_matrices).reshape(t_steps, -1)
-    residual = v_abs - np.mean(v_abs, axis=0)
-    variance_profile = PCA(n_components=1).fit_transform(residual).flatten()
-    return float(np.var(variance_profile))
+CFAR_REFERENCE_CELLS = int(os.getenv("CFAR_REFERENCE_CELLS", 32))
+CFAR_PFA = float(os.getenv("CFAR_PFA", 1e-3))
 
 def dispatcher(sanitized_file, out_json, state_file=None):
     data = np.load(sanitized_file, allow_pickle=True).item()
@@ -46,11 +41,12 @@ def dispatcher(sanitized_file, out_json, state_file=None):
         client_mac, ap_mac, pkt_config = bucket_key.split('_')
         nt = int(pkt_config.split('x')[0])
 
+        bucket_state = state_store.get_bucket(state, bucket_key) if state_file else None
+
         # Fold this chunk's samples into the bucket's sliding window before
         # running any estimator, so KPVT/SSE see up to WINDOW_CHUNKS chunks
         # of history instead of only the chunk that just arrived.
-        if state_file:
-            bucket_state = state_store.get_bucket(state, bucket_key)
+        if bucket_state is not None:
             # 2_1_Temporal_Sanitizer.py resamples onto a fixed 100Hz grid and does not
             # retain per-sample wall-clock timestamps, so the window is trimmed by
             # chunk count (WINDOW_CHUNKS) rather than by sample age; the first tuple
@@ -67,8 +63,28 @@ def dispatcher(sanitized_file, out_json, state_file=None):
 
         client_rssi = float(np.mean(rssi_window))
 
-        ke = kpvt_module(v_matrices)
+        # kpvt_module uses the bucket's carried-over VSS-LMS background estimate
+        # when state is available (see 3_2_Kinematic_Tracker.py), falling back to
+        # a static per-chunk mean otherwise.
+        ke = kinematic_tracker.kpvt_module(v_matrices, bucket_state)
         packets = v_matrices.shape[0]
+
+        # OS-CFAR: estimate this bucket's own dynamic detection threshold from
+        # its recent kinematic-energy history *before* this chunk's value is
+        # folded in, so the decision for this chunk isn't influenced by itself.
+        # Runs alongside (not instead of) the static KE_THRESHOLD comparison
+        # Stage 4 already makes: is_occupied_cfar is None (Stage 4 falls back
+        # to the static threshold) until enough reference history accumulates,
+        # then takes over as a per-bucket, self-calibrating alternative to one
+        # constant applied uniformly across every bucket and environment.
+        cfar_threshold, is_occupied_cfar = None, None
+        if bucket_state is not None:
+            cfar_threshold = kinematic_tracker.os_cfar_threshold(
+                bucket_state["cfar_reference"], p_fa=CFAR_PFA
+            )
+            if cfar_threshold is not None:
+                is_occupied_cfar = bool(ke > cfar_threshold)
+            state_store.push_cfar_reference(bucket_state, ke, CFAR_REFERENCE_CELLS)
 
         ap_aod = None
         aod_confidence = None
@@ -96,6 +112,8 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             "routing": routing,
             "algorithm": algo_name,
             "kinematic_energy": ke,
+            "cfar_threshold": cfar_threshold,
+            "is_occupied_cfar": is_occupied_cfar,
             "ap_aod": ap_aod,
             "aod_confidence": aod_confidence,
             "client_rssi": client_rssi

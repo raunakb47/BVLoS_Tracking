@@ -86,13 +86,20 @@ def stage4_inference(stage3_json, state_file=None):
 
     for bucket, data in results.items():
         ke = data["kinematic_energy"]
-        is_occupied = ke > KE_THRESHOLD
+        # OS-CFAR (3_2_Kinematic_Tracker.py) gives each bucket its own dynamic
+        # detection threshold once it has accumulated enough kinematic-energy
+        # history; is_occupied_cfar is None before that history exists, in
+        # which case the static global KE_THRESHOLD is used as the cold-start
+        # fallback rather than leaving the bucket undetectable until then.
+        is_occupied_cfar = data.get("is_occupied_cfar")
+        is_occupied = is_occupied_cfar if is_occupied_cfar is not None else (ke > KE_THRESHOLD)
         if is_occupied: dashboard_state["Occupancy"] += 1
 
         entity = {
             "Mac": data["client_mac"],
             "State": "MOVING" if is_occupied else "STATIC",
             "Kinetic_Energy": round(ke, 4),
+            "Detector": "OS-CFAR" if is_occupied_cfar is not None else "STATIC_THRESHOLD",
             "UI_Render": {}
         }
 
