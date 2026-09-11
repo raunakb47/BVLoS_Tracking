@@ -13,6 +13,7 @@ from importlib import import_module
 
 state_store = import_module('state_store')
 hotspot_classifier = import_module('hotspot_classifier')
+tx_power_estimator = import_module('tx_power_estimator')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
@@ -29,6 +30,22 @@ _MOBILE_OUI_TABLE = (
     hotspot_classifier.load_mobile_oui_table(MOBILE_OUI_TABLE_PATH)
     if MOBILE_OUI_TABLE_PATH else None
 )
+
+# Optional path to a {mac: tx_power_dbm} JSON export of AP-advertised
+# Country/Power-Constraint/TPE elements -- see
+# tx_power_estimator.load_tx_power_table(). Unset by default: AP transmit
+# power falls back to a literature-typical per-band constant until this is
+# populated (see #5/#6 capture-filter work for how it gets populated).
+AP_TX_POWER_TABLE_PATH = os.getenv("AP_TX_POWER_TABLE_PATH")
+_AP_TX_POWER_TABLE = (
+    tx_power_estimator.load_tx_power_table(AP_TX_POWER_TABLE_PATH)
+    if AP_TX_POWER_TABLE_PATH else None
+)
+
+# Fallback AP-Monitor Card distance (meters) used only until a real
+# measurement is available (see estimate_ap_baseline): this is a placeholder,
+# not a calibrated value, and should not be trusted as ground truth.
+DEFAULT_AP_DISTANCE_M = float(os.getenv("DEFAULT_AP_DISTANCE_M", 5.0))
 
 # Monitor Card is ALWAYS the center of the grid
 MC_COORDS = np.array([0.0, 0.0])
@@ -48,35 +65,54 @@ def channel_to_frequency(channel):
         # Fallback to standard Ch 36 if an unsupported channel is provided
         return 5180.0 
 
-def estimate_ap_baseline(ap_mac, ssid=None):
+def estimate_ap_baseline(ap_mac, ssid=None, ap_distance_m=None):
     """
     In real-time mode, establishes the Y-Axis baseline dynamically.
+
+    The coordinate system is defined with the AP on the positive Y-axis by
+    convention (a purely local/ego-centric frame anchored on the monitor
+    card, not an absolute compass bearing), so only the AP's *distance* from
+    the monitor card needs to be established -- no angle-of-arrival at the
+    monitor card is required. ap_distance_m is accepted for forward
+    compatibility with an AP-beacon-RSSI-derived range measurement (an
+    independent third leg of the localization triangle -- Client-AP bearing
+    from BFI, Client-MonitorCard range from client_rssi, and this
+    AP-MonitorCard range from the AP's own overheard Beacon RSSI -- see the
+    #5/#6 capture-filter work); until that capture change lands and supplies
+    a real value, this falls back to DEFAULT_AP_DISTANCE_M, an admitted
+    placeholder rather than a measurement.
 
     "mobile" is a best-effort classification (see hotspot_classifier.py),
     not a confirmed device type: the previous check here ("HOT"/"MOB"
     substrings of a hex MAC address) could never match anything, so every
     link was silently treated as a fixed AP regardless of what it actually
-    was. ssid is accepted for forward compatibility with Beacon/Probe
-    Response capture (not yet performed by this pipeline's Stage 1) and is
-    None until that capture-filter change lands.
+    was. ssid is likewise accepted for forward compatibility with
+    Beacon/Probe Response capture and is None until that lands.
     """
     is_mobile, mobility_confidence, mobility_reason = hotspot_classifier.classify_beamformer(
         ap_mac, ssid=ssid, oui_table=_MOBILE_OUI_TABLE
     )
+    distance = ap_distance_m if ap_distance_m is not None else DEFAULT_AP_DISTANCE_M
     return {
-        "pos": np.array([0.0, 5.0]),
+        "pos": np.array([0.0, distance]),
+        "distance_is_measured": ap_distance_m is not None,
         "mobile": is_mobile,
         "mobility_confidence": mobility_confidence,
         "mobility_reason": mobility_reason,
     }
 
-def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz):
+def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_power_dbm):
     """
     Geometrically intersects the AP's Angle Ray with the Monitor Card's RSSI Distance Circle.
     """
-    # FSPL formula calculating radius using the dynamically generated frequency
-    r = 10 ** ((27.55 - (20 * np.log10(freq_mhz)) + abs(client_rssi)) / 20.0)
-    
+    # FSPL: path loss (dB) = transmit power - received power (Friis, ignoring
+    # antenna gains, which are also unknown for a third-party device this
+    # pipeline never associates with). tx_power_dbm comes from
+    # tx_power_estimator.py rather than being assumed to be 0 dBm, which the
+    # previous abs(client_rssi)-as-path-loss form implicitly did.
+    path_loss_db = tx_power_dbm - client_rssi
+    r = 10 ** ((path_loss_db - (20 * np.log10(freq_mhz)) + 27.55) / 20.0)
+
     rad_ap = np.radians(ap_aod)
     D = np.array([np.sin(rad_ap), np.cos(rad_ap)])
     O = ap_pos - mc_pos
@@ -145,9 +181,13 @@ def stage4_inference(stage3_json, state_file=None):
             ap_info = estimate_ap_baseline(ap_mac)
             ap_pos = ap_info["pos"]
 
-            # Pass the derived frequency into the intersection engine
+            # client_rssi is the RSSI of the CLIENT's own Compressed Beamforming
+            # Report frame (sent client -> AP, overheard at the monitor card), so
+            # ranging on it needs the client's typical transmit power, not the AP's.
+            client_tx_power_dbm, tx_power_source = tx_power_estimator.estimate_client_tx_power_dbm()
+
             client_coords, mc_distance = ray_circle_intersection(
-                ap_pos, MC_COORDS, data["ap_aod"], data["client_rssi"], operating_freq
+                ap_pos, MC_COORDS, data["ap_aod"], data["client_rssi"], operating_freq, client_tx_power_dbm
             )
 
             cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"])
@@ -164,6 +204,14 @@ def stage4_inference(stage3_json, state_file=None):
                     "MC_Distance_m": round(mc_distance, 2)
                 },
                 "Track_Status": "CONFIRMED",
+                # Surfaces which parts of this geometry are actual measurements
+                # vs. literature-typical/placeholder fallbacks, rather than
+                # presenting a single point with no indication of provenance.
+                "Calibration": {
+                    "Client_TX_Power_dBm": client_tx_power_dbm,
+                    "Client_TX_Power_Source": tx_power_source,
+                    "AP_Distance_Is_Measured": ap_info["distance_is_measured"],
+                },
                 # is_mobile is a best-effort guess (hotspot_classifier.py), surfaced
                 # with its own confidence/reason rather than presented as fact -- a
                 # dashboard should visibly distinguish this from a measured quantity.
