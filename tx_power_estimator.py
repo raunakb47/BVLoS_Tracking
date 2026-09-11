@@ -44,6 +44,25 @@ until/unless that one-time frame is captured.
 """
 import json
 
+
+def channel_to_frequency(channel):
+    """
+    Converts IEEE 802.11 channel numbers to center frequency (MHz).
+    Supports standard 2.4 GHz and 5 GHz bands. Shared by
+    4_Stage4_Inference.py (client-ranging path) and ap_registry.py's CLI
+    (AP-ranging path) so both range calculations use the same band mapping.
+    """
+    if 1 <= channel <= 13:
+        return 2407.0 + (5.0 * channel)
+    elif channel == 14:
+        return 2484.0
+    elif 32 <= channel <= 177:
+        return 5000.0 + (5.0 * channel)
+    else:
+        # Fallback to standard Ch 36 if an unsupported channel is provided
+        return 5180.0
+
+
 # ETSI EN 300 328 / EN 301 893 mean-EIRP limits, which also match the modal
 # configured power for commodity APs in practice (FCC 47 CFR 15.247/15.407
 # allow more -- up to 30-36 dBm depending on band/sub-band -- so these
@@ -103,3 +122,19 @@ def estimate_client_tx_power_dbm():
     isn't available yet for client devices.
     """
     return DEFAULT_TX_POWER_DBM_CLIENT, "DEFAULT"
+
+
+def fspl_distance_m(rssi_dbm, tx_power_dbm, freq_mhz):
+    """
+    Free Space Path Loss distance estimate (meters) given a received signal
+    strength, an assumed/measured transmit power, and the operating
+    frequency. Path loss (dB) = transmit power - received power (Friis,
+    ignoring antenna gains, which are also unknown for a third-party device
+    this pipeline never associates with). Shared by both the client-ranging
+    path (4_Stage4_Inference.py's ray_circle_intersection) and the
+    AP-ranging path (ap_registry.py) so the same formula isn't maintained
+    in two places.
+    """
+    import numpy as np
+    path_loss_db = tx_power_dbm - rssi_dbm
+    return float(10 ** ((path_loss_db - (20 * np.log10(freq_mhz)) + 27.55) / 20.0))

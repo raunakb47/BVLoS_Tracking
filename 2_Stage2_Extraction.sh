@@ -15,9 +15,20 @@ do
     RAW_VMATRIX="${WATCH_DIR}/${BASE}_vmatrix.npy"
     RAW_ANGLES="${WATCH_DIR}/${BASE}_angles.npy"
     SANITIZED="${WATCH_DIR}/${BASE}_sanitized.npy"
-    
+    AP_CHUNK_META="${WATCH_DIR}/${BASE}_ap_metadata.json"
+
     python3 "$WIBFI_DIR/main.py" "$NEW_PCAP" "$WIFI_STANDARD" "$MIMO_MODE" "$FALLBACK_CONFIG" "$BANDWIDTH" "$MAX_PACKETS" "$RAW_VMATRIX" "$RAW_ANGLES" >> "$LOG_FILE" 2>&1
-    
+
+    # Reads the same chunk for Beacon frames (now captured alongside BFI
+    # action frames -- see CAPTURE_FILTER in config.env) and folds any
+    # SSID/transmit-power/RSSI observed for each AP into the persistent
+    # registry Stage 4 reads for the AP-distance and mobile-hotspot signals.
+    python3 extract_ap_metadata.py "$NEW_PCAP" "$AP_CHUNK_META" >> "$LOG_FILE" 2>&1
+    if [ -f "$AP_CHUNK_META" ]; then
+        python3 ap_registry.py "$AP_CHUNK_META" "$AP_REGISTRY_PATH" "$WIFI_CHANNEL" >> "$LOG_FILE" 2>&1
+        rm -f "$AP_CHUNK_META"
+    fi
+
     if [ -f "$RAW_VMATRIX" ]; then
         python3 2_1_Temporal_Sanitizer.py "$RAW_VMATRIX" "$TDT_MS" >> "$LOG_FILE" 2>&1
         

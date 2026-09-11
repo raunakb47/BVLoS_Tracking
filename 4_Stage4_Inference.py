@@ -14,6 +14,7 @@ from importlib import import_module
 state_store = import_module('state_store')
 hotspot_classifier = import_module('hotspot_classifier')
 tx_power_estimator = import_module('tx_power_estimator')
+ap_registry = import_module('ap_registry')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
@@ -31,16 +32,12 @@ _MOBILE_OUI_TABLE = (
     if MOBILE_OUI_TABLE_PATH else None
 )
 
-# Optional path to a {mac: tx_power_dbm} JSON export of AP-advertised
-# Country/Power-Constraint/TPE elements -- see
-# tx_power_estimator.load_tx_power_table(). Unset by default: AP transmit
-# power falls back to a literature-typical per-band constant until this is
-# populated (see #5/#6 capture-filter work for how it gets populated).
-AP_TX_POWER_TABLE_PATH = os.getenv("AP_TX_POWER_TABLE_PATH")
-_AP_TX_POWER_TABLE = (
-    tx_power_estimator.load_tx_power_table(AP_TX_POWER_TABLE_PATH)
-    if AP_TX_POWER_TABLE_PATH else None
-)
+# Path to the persistent, cross-chunk AP metadata registry (SSID, transmit
+# power, beacon-RSSI-derived distance) that 2_Stage2_Extraction.sh maintains
+# via extract_ap_metadata.py + ap_registry.py once Beacon/Probe Response
+# capture is enabled (#5/#6). Read fresh each invocation since this process
+# does not own writing it -- Stage 2's watchdog does, once per chunk.
+AP_REGISTRY_PATH = os.getenv("AP_REGISTRY_PATH")
 
 # Fallback AP-Monitor Card distance (meters) used only until a real
 # measurement is available (see estimate_ap_baseline): this is a placeholder,
@@ -49,21 +46,6 @@ DEFAULT_AP_DISTANCE_M = float(os.getenv("DEFAULT_AP_DISTANCE_M", 5.0))
 
 # Monitor Card is ALWAYS the center of the grid
 MC_COORDS = np.array([0.0, 0.0])
-
-def channel_to_frequency(channel):
-    """
-    Converts IEEE 802.11 channel numbers to center frequency (MHz).
-    Supports standard 2.4 GHz and 5 GHz bands.
-    """
-    if 1 <= channel <= 13:
-        return 2407.0 + (5.0 * channel)
-    elif channel == 14:
-        return 2484.0
-    elif 32 <= channel <= 177:
-        return 5000.0 + (5.0 * channel)
-    else:
-        # Fallback to standard Ch 36 if an unsupported channel is provided
-        return 5180.0 
 
 def estimate_ap_baseline(ap_mac, ssid=None, ap_distance_m=None):
     """
@@ -105,13 +87,10 @@ def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_po
     """
     Geometrically intersects the AP's Angle Ray with the Monitor Card's RSSI Distance Circle.
     """
-    # FSPL: path loss (dB) = transmit power - received power (Friis, ignoring
-    # antenna gains, which are also unknown for a third-party device this
-    # pipeline never associates with). tx_power_dbm comes from
-    # tx_power_estimator.py rather than being assumed to be 0 dBm, which the
-    # previous abs(client_rssi)-as-path-loss form implicitly did.
-    path_loss_db = tx_power_dbm - client_rssi
-    r = 10 ** ((path_loss_db - (20 * np.log10(freq_mhz)) + 27.55) / 20.0)
+    # tx_power_dbm comes from tx_power_estimator.py rather than being assumed
+    # to be 0 dBm, which the previous abs(client_rssi)-as-path-loss form
+    # implicitly did.
+    r = tx_power_estimator.fspl_distance_m(client_rssi, tx_power_dbm, freq_mhz)
 
     rad_ap = np.radians(ap_aod)
     D = np.array([np.sin(rad_ap), np.cos(rad_ap)])
@@ -139,12 +118,13 @@ def calculate_dynamic_cep(ke, is_mobile):
 
 def stage4_inference(stage3_json, state_file=None):
     # Perform channel to frequency translation once upon execution
-    operating_freq = channel_to_frequency(WIFI_CHANNEL)
+    operating_freq = tx_power_estimator.channel_to_frequency(WIFI_CHANNEL)
 
     with open(stage3_json, 'r') as f:
         results = json.load(f)
 
     state = state_store.load_state(state_file) if state_file else {}
+    registry = ap_registry.load_registry(AP_REGISTRY_PATH) if AP_REGISTRY_PATH else {}
     dashboard_state = {"Occupancy": 0, "Entities": []}
     seen_bucket_keys = []
 
@@ -178,7 +158,10 @@ def stage4_inference(stage3_json, state_file=None):
         if data["routing"] == "KPVT_AND_SSE" and data.get("aod_confidence") != "LOW":
             seen_bucket_keys.append(bucket)
             ap_mac = data["ap_mac"]
-            ap_info = estimate_ap_baseline(ap_mac)
+            ap_record = registry.get(ap_mac, {})
+            ap_info = estimate_ap_baseline(
+                ap_mac, ssid=ap_record.get("ssid"), ap_distance_m=ap_record.get("ap_distance_m")
+            )
             ap_pos = ap_info["pos"]
 
             # client_rssi is the RSSI of the CLIENT's own Compressed Beamforming
