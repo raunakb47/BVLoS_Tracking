@@ -12,10 +12,23 @@ import numpy as np
 from importlib import import_module
 
 state_store = import_module('state_store')
+hotspot_classifier = import_module('hotspot_classifier')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
 TRACK_COAST_LIMIT = int(os.getenv("TRACK_COAST_LIMIT", state_store.DEFAULT_COAST_LIMIT))
+
+# Optional path to a real (oui_hex, vendor_name) CSV export -- see
+# hotspot_classifier.load_mobile_oui_table(). Unset by default: the
+# classifier's built-in table is illustrative only (a handful of verified
+# entries out of the 1500+/900+ blocks Apple/Samsung alone hold), so mobile-
+# hotspot classification is UNKNOWN for most real devices until a real table
+# is configured here.
+MOBILE_OUI_TABLE_PATH = os.getenv("MOBILE_OUI_TABLE_PATH")
+_MOBILE_OUI_TABLE = (
+    hotspot_classifier.load_mobile_oui_table(MOBILE_OUI_TABLE_PATH)
+    if MOBILE_OUI_TABLE_PATH else None
+)
 
 # Monitor Card is ALWAYS the center of the grid
 MC_COORDS = np.array([0.0, 0.0])
@@ -35,12 +48,27 @@ def channel_to_frequency(channel):
         # Fallback to standard Ch 36 if an unsupported channel is provided
         return 5180.0 
 
-def estimate_ap_baseline(ap_mac):
+def estimate_ap_baseline(ap_mac, ssid=None):
     """
     In real-time mode, establishes the Y-Axis baseline dynamically.
+
+    "mobile" is a best-effort classification (see hotspot_classifier.py),
+    not a confirmed device type: the previous check here ("HOT"/"MOB"
+    substrings of a hex MAC address) could never match anything, so every
+    link was silently treated as a fixed AP regardless of what it actually
+    was. ssid is accepted for forward compatibility with Beacon/Probe
+    Response capture (not yet performed by this pipeline's Stage 1) and is
+    None until that capture-filter change lands.
     """
-    is_mobile = True if "HOT" in ap_mac or "MOB" in ap_mac else False
-    return {"pos": np.array([0.0, 5.0]), "mobile": is_mobile}
+    is_mobile, mobility_confidence, mobility_reason = hotspot_classifier.classify_beamformer(
+        ap_mac, ssid=ssid, oui_table=_MOBILE_OUI_TABLE
+    )
+    return {
+        "pos": np.array([0.0, 5.0]),
+        "mobile": is_mobile,
+        "mobility_confidence": mobility_confidence,
+        "mobility_reason": mobility_reason,
+    }
 
 def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz):
     """
@@ -135,7 +163,15 @@ def stage4_inference(stage3_json, state_file=None):
                     "AP_AoD": round(data["ap_aod"], 1),
                     "MC_Distance_m": round(mc_distance, 2)
                 },
-                "Track_Status": "CONFIRMED"
+                "Track_Status": "CONFIRMED",
+                # is_mobile is a best-effort guess (hotspot_classifier.py), surfaced
+                # with its own confidence/reason rather than presented as fact -- a
+                # dashboard should visibly distinguish this from a measured quantity.
+                "Anchor_Mobility": {
+                    "is_mobile": ap_info["mobile"],
+                    "confidence": ap_info["mobility_confidence"],
+                    "reason": ap_info["mobility_reason"],
+                }
             }
 
             # Remember this fix so a subsequent chunk with zero packets for this
