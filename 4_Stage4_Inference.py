@@ -20,6 +20,13 @@ KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
 TRACK_COAST_LIMIT = int(os.getenv("TRACK_COAST_LIMIT", state_store.DEFAULT_COAST_LIMIT))
 
+# Log-distance path loss exponent (tx_power_estimator.log_distance_m). 2.0 is
+# free space (FSPL, this framework's original/blind default); real indoor
+# NLOS propagation runs higher (see log_distance_m's docstring) and a fixed
+# n=2 assumption systematically overestimates range through walls -- set
+# this once real per-site calibration is available.
+PATH_LOSS_EXPONENT = float(os.getenv("PATH_LOSS_EXPONENT", tx_power_estimator.DEFAULT_PATH_LOSS_EXPONENT))
+
 # Optional path to a real (oui_hex, vendor_name) CSV export -- see
 # hotspot_classifier.load_mobile_oui_table(). Unset by default: the
 # classifier's built-in table is illustrative only (a handful of verified
@@ -89,8 +96,9 @@ def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_po
     """
     # tx_power_dbm comes from tx_power_estimator.py rather than being assumed
     # to be 0 dBm, which the previous abs(client_rssi)-as-path-loss form
-    # implicitly did.
-    r = tx_power_estimator.fspl_distance_m(client_rssi, tx_power_dbm, freq_mhz)
+    # implicitly did. PATH_LOSS_EXPONENT lets a calibrated deployment correct
+    # for real indoor/NLOS loss instead of the free-space default.
+    r = tx_power_estimator.log_distance_m(client_rssi, tx_power_dbm, freq_mhz, PATH_LOSS_EXPONENT)
 
     rad_ap = np.radians(ap_aod)
     D = np.array([np.sin(rad_ap), np.cos(rad_ap)])
@@ -109,12 +117,22 @@ def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_po
         
     return ap_pos + (t * D), r
 
-def calculate_dynamic_cep(ke, is_mobile):
-    """ Dynamically models error radius based on physics and routing """
+def calculate_dynamic_cep(ke, is_mobile, range_uncertainty_m=0.0):
+    """
+    Dynamically models error radius based on physics and routing.
+
+    range_uncertainty_m (tx_power_estimator.range_uncertainty_m, first-order
+    propagation of this chunk's RSSI standard deviation through the ranging
+    formula) is a new term: previously the uncertainty radius only reflected
+    motion/mobility, so a bucket with a rock-solid RSSI reading and one with
+    RSSI swinging over several dB from fading reported the identical
+    confidence circle. A noisier ranging input now widens the reported
+    circle instead of that being silently absorbed into the point estimate.
+    """
     base_error = 0.5
     mobility_penalty = 1.5 if is_mobile else 0.0
     kinematic_penalty = min(ke * 10, 2.0)
-    return round(base_error + mobility_penalty + kinematic_penalty, 2)
+    return round(base_error + mobility_penalty + kinematic_penalty + range_uncertainty_m, 2)
 
 def stage4_inference(stage3_json, state_file=None):
     # Perform channel to frequency translation once upon execution
@@ -173,7 +191,10 @@ def stage4_inference(stage3_json, state_file=None):
                 ap_pos, MC_COORDS, data["ap_aod"], data["client_rssi"], operating_freq, client_tx_power_dbm
             )
 
-            cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"])
+            range_uncertainty = tx_power_estimator.range_uncertainty_m(
+                mc_distance, data.get("client_rssi_std", 0.0), PATH_LOSS_EXPONENT
+            )
+            cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"], range_uncertainty)
 
             entity["UI_Render"] = {
                 "Tracking_Type": "Ray_Circle_Intersection",
@@ -194,6 +215,8 @@ def stage4_inference(stage3_json, state_file=None):
                     "Client_TX_Power_dBm": client_tx_power_dbm,
                     "Client_TX_Power_Source": tx_power_source,
                     "AP_Distance_Is_Measured": ap_info["distance_is_measured"],
+                    "Path_Loss_Exponent": PATH_LOSS_EXPONENT,
+                    "Range_Uncertainty_m": round(range_uncertainty, 2),
                 },
                 # is_mobile is a best-effort guess (hotspot_classifier.py), surfaced
                 # with its own confidence/reason rather than presented as fact -- a

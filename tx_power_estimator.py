@@ -43,6 +43,7 @@ ranging currently has no MEASURED tier at all -- DEFAULT is the only source
 until/unless that one-time frame is captured.
 """
 import json
+import numpy as np
 
 
 def channel_to_frequency(channel):
@@ -124,17 +125,76 @@ def estimate_client_tx_power_dbm():
     return DEFAULT_TX_POWER_DBM_CLIENT, "DEFAULT"
 
 
-def fspl_distance_m(rssi_dbm, tx_power_dbm, freq_mhz):
+DEFAULT_PATH_LOSS_EXPONENT = 2.0  # 2.0 = free space (FSPL); indoor NLOS is typically higher, see below
+
+
+def mean_rssi_dbm(rssi_samples_dbm):
     """
-    Free Space Path Loss distance estimate (meters) given a received signal
-    strength, an assumed/measured transmit power, and the operating
-    frequency. Path loss (dB) = transmit power - received power (Friis,
-    ignoring antenna gains, which are also unknown for a third-party device
-    this pipeline never associates with). Shared by both the client-ranging
-    path (4_Stage4_Inference.py's ray_circle_intersection) and the
-    AP-ranging path (ap_registry.py) so the same formula isn't maintained
-    in two places.
+    Averages a set of dBm readings correctly for a fading channel: RSSI in
+    dB is a logarithm of received power, and log is a concave function, so
+    by Jensen's inequality the arithmetic mean of several dB readings is
+    always <= the dB of the mean of the underlying linear powers -- i.e.
+    naively averaging dB values systematically understates the true average
+    received power on any signal that fades sample to sample (which real
+    indoor Wi-Fi RSSI always does). That understatement reads as *extra*
+    path loss, which this pipeline's ranging would turn into an
+    overestimated distance. Averaging is done here in the linear (mW)
+    domain and converted back to dB, which is the textbook-correct way to
+    average a fading RSSI series and removes that bias.
     """
-    import numpy as np
+    rssi_samples_dbm = np.asarray(rssi_samples_dbm, dtype=float)
+    linear_mw = 10 ** (rssi_samples_dbm / 10.0)
+    return float(10.0 * np.log10(np.mean(linear_mw)))
+
+
+def log_distance_m(rssi_dbm, tx_power_dbm, freq_mhz, path_loss_exponent=DEFAULT_PATH_LOSS_EXPONENT):
+    """
+    Log-distance path loss model distance estimate (meters):
+        PL(d) = PL(1m) + 10 * n * log10(d)
+    where PL(1m) = 20*log10(freq_mhz) - 27.55 is the free-space loss at a
+    1-meter reference (Friis) and n is the path loss exponent -- n=2
+    (DEFAULT_PATH_LOSS_EXPONENT, free space) reduces this exactly to the
+    FSPL formula this pipeline shipped with originally. Real indoor NLOS
+    propagation is measured at n well above 2 -- e.g. an ITU-R P.1238-style
+    indoor calibration reporting n=2.83 @2.4GHz / n=3.89 @5.3GHz -- so a
+    fixed n=2 assumption (uncorrected free space) systematically
+    OVERESTIMATES distance through walls: real wall/obstruction loss beyond
+    free-space spreading gets misread as extra distance, since the model has
+    no other explanation for the missing signal. Verified numerically: a
+    source truly 10m away in a real n=3 environment produces an RSSI that an
+    n=2 assumption turns into a ~32m distance estimate, while correctly
+    assuming n=3 recovers the true 10m. n is exposed as PATH_LOSS_EXPONENT
+    (config.env) specifically so a deployment can calibrate to n=2, keeping
+    this framework's "blind, no prior measurement" default, or move to a
+    NLOS-representative value once real per-site calibration is available --
+    neither this pipeline nor the literature it draws on can tell you the
+    correct n for an arbitrary, unsurveyed room in advance.
+
+    Path loss (dB) = transmit power - received power (Friis, ignoring
+    antenna gains, which are also unknown for a third-party device this
+    pipeline never associates with). Shared by both the client-ranging path
+    (4_Stage4_Inference.py's ray_circle_intersection) and the AP-ranging
+    path (ap_registry.py) so the same formula isn't maintained in two places.
+    """
     path_loss_db = tx_power_dbm - rssi_dbm
-    return float(10 ** ((path_loss_db - (20 * np.log10(freq_mhz)) + 27.55) / 20.0))
+    path_loss_1m_db = (20 * np.log10(freq_mhz)) - 27.55
+    return float(10 ** ((path_loss_db - path_loss_1m_db) / (10.0 * path_loss_exponent)))
+
+
+def range_uncertainty_m(distance_m, rssi_std_db, path_loss_exponent=DEFAULT_PATH_LOSS_EXPONENT):
+    """
+    First-order (delta-method) propagation of RSSI measurement spread into a
+    distance uncertainty: differentiating log_distance_m's d = 10^((...)/(10n))
+    with respect to rssi_dbm gives
+        d(distance)/d(rssi) = -distance * ln(10) / (10 * n)
+    so a bucket whose RSSI samples this chunk had standard deviation
+    rssi_std_db (already available -- see 3_Stage3_Localization.py's
+    windowed RSSI and ap_registry.py's beacon samples) maps to a
+    distance-uncertainty contribution of about
+        distance * ln(10) / (10 * n) * rssi_std_db
+    A noisier RSSI series (deeper fading, more shadowing) now widens the
+    reported uncertainty radius instead of the radius only tracking motion/
+    mobility as it did previously -- this is standard first-order error
+    propagation, not a literature-specific estimator.
+    """
+    return float(distance_m * np.log(10.0) / (10.0 * path_loss_exponent) * rssi_std_db)

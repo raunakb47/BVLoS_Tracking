@@ -24,6 +24,7 @@ from importlib import import_module
 spatial_algos = import_module('3_1_Spatial_Algorithms')
 state_store = import_module('state_store')
 kinematic_tracker = import_module('3_2_Kinematic_Tracker')
+tx_power_estimator = import_module('tx_power_estimator')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 STARVED_LIMIT = int(os.getenv("PACKET_STARVATION_LIMIT", 15))
@@ -61,7 +62,16 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             v_matrices = payload['v_matrices']
             rssi_window = payload['rssi']
 
-        client_rssi = float(np.mean(rssi_window))
+        # Averaging RSSI in the linear (mW) domain, not the raw dBm values,
+        # avoids a real bias: dB is a concave (log) transform of power, so a
+        # naive arithmetic mean of several dB readings from a fading signal
+        # is always below the dB of the true average power (Jensen's
+        # inequality) -- read here as extra path loss, and turned into an
+        # overestimated range downstream. rssi_std feeds range_uncertainty_m
+        # in Stage 4 so a noisier (more-faded) chunk widens the reported
+        # position uncertainty instead of that noise being silently dropped.
+        client_rssi = tx_power_estimator.mean_rssi_dbm(rssi_window)
+        client_rssi_std = float(np.std(rssi_window))
 
         # kpvt_module uses the bucket's carried-over VSS-LMS background estimate
         # when state is available (see 3_2_Kinematic_Tracker.py), falling back to
@@ -116,7 +126,8 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             "is_occupied_cfar": is_occupied_cfar,
             "ap_aod": ap_aod,
             "aod_confidence": aod_confidence,
-            "client_rssi": client_rssi
+            "client_rssi": client_rssi,
+            "client_rssi_std": client_rssi_std
         }
 
     if state_file:

@@ -59,6 +59,9 @@ import json
 import subprocess
 import csv
 import io
+from importlib import import_module
+
+tx_power_estimator = import_module('tx_power_estimator')
 
 FIELDS = [
     "wlan.ta",
@@ -124,8 +127,11 @@ def extract(pcap_file, out_json):
         mac: {
             "ssid": data["ssid"],
             "tx_power_dbm": data["tx_power_dbm"],
+            # Averaged in the linear power domain (tx_power_estimator.mean_rssi_dbm),
+            # not a naive dB mean, which understates true average received power for
+            # a fading signal (Jensen's inequality) and would read as extra path loss.
             "beacon_rssi_mean": (
-                sum(data["rssi_samples"]) / len(data["rssi_samples"])
+                tx_power_estimator.mean_rssi_dbm(data["rssi_samples"])
                 if data["rssi_samples"] else None
             ),
         }
