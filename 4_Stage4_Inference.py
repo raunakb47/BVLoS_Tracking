@@ -145,6 +145,7 @@ def stage4_inference(stage3_json, state_file=None):
     registry = ap_registry.load_registry(AP_REGISTRY_PATH) if AP_REGISTRY_PATH else {}
     dashboard_state = {"Occupancy": 0, "Entities": []}
     seen_bucket_keys = []
+    entity_by_bucket = {}
 
     for bucket, data in results.items():
         ke = data["kinematic_energy"]
@@ -234,6 +235,10 @@ def stage4_inference(stage3_json, state_file=None):
             if state_file:
                 state_store.mark_fix(state_store.get_bucket(state, bucket), client_coords, data["ap_aod"])
 
+        # Indexed by bucket so the coast pass below can fill in a held position
+        # for a bucket that IS in this chunk but produced no usable angle,
+        # instead of appending a second, contradictory entity for the same MAC.
+        entity_by_bucket[bucket] = entity
         dashboard_state["Entities"].append(entity)
 
     # BFI arrives on whatever cadence the AP happens to sound its clients at;
@@ -248,25 +253,35 @@ def stage4_inference(stage3_json, state_file=None):
     if state_file:
         surviving = state_store.touch_buckets(state, seen_bucket_keys, coast_limit=TRACK_COAST_LIMIT)
         for bucket_key in surviving:
-            if bucket_key in seen_bucket_keys:
-                continue
             bucket_state = state[bucket_key]
             if bucket_state["track_status"] != "COASTING":
                 continue
             client_mac, ap_mac, pkt_config = bucket_key.split('_')
-            age_s = time.time() - bucket_state["last_seen_ts"]
+            coast_render = {
+                "Tracking_Type": "Ray_Circle_Intersection",
+                "Anchor_MAC": ap_mac,
+                "Client_Coords": bucket_state["last_position"],
+                "Vectors": {"AP_AoD": bucket_state["last_ap_aod"]},
+                "Track_Status": "COASTING",
+                "Age_Seconds": round(time.time() - bucket_state["last_seen_ts"], 1)
+            }
+
+            existing = entity_by_bucket.get(bucket_key)
+            if existing is not None:
+                # Bucket had packets this chunk but no accepted angle (LOW SSE
+                # confidence). KPVT's occupancy read stands, so keep the entity's
+                # State/Kinetic_Energy and attach the held position rather than
+                # rendering it with an empty UI_Render, which would blink the
+                # client off the map for exactly the chunks where the framework
+                # is meant to fall back on KPVT.
+                existing["UI_Render"] = coast_render
+                continue
+
             dashboard_state["Entities"].append({
                 "Mac": client_mac,
                 "State": "STALE",
                 "Kinetic_Energy": None,
-                "UI_Render": {
-                    "Tracking_Type": "Ray_Circle_Intersection",
-                    "Anchor_MAC": ap_mac,
-                    "Client_Coords": bucket_state["last_position"],
-                    "Vectors": {"AP_AoD": bucket_state["last_ap_aod"]},
-                    "Track_Status": "COASTING",
-                    "Age_Seconds": round(age_s, 1)
-                }
+                "UI_Render": coast_render
             })
         state_store.save_state(state_file, state)
 
