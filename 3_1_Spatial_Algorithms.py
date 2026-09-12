@@ -22,6 +22,8 @@ withheld this chunk (deferring to KPVT's occupancy signal and the previous
 confirmed position) -- i.e. KPVT and SSE operate as complementary signals
 rather than a strict "SSE always wins when it runs" pipeline.
 """
+import os
+
 import numpy as np
 from scipy import linalg
 
@@ -36,7 +38,20 @@ _MDL_MIN_ELEMENTS = 3
 # threshold (roughly a 5x/7dB power gap), not a literature-derived constant --
 # unlike the MDL test, there is no standard closed-form P_fa for it, so treat
 # it as a tunable gate rather than a statistically calibrated one.
-_EIGENVALUE_DOMINANCE_RATIO = 3.0
+#
+# Both thresholds are env-overridable because neither is calibrated against
+# ground-truth-labelled captures yet, and measurements on the bundled Wi-BFI
+# traces show them disagreeing on real data: an 11ac 3x1 capture (M=3) gave
+# eigenvalue ratios of 1.6-1.8 (below this threshold) while MDL reported a
+# single source, and an 11ax 4x2 capture (M=4) gave ratios of 5.9-15.4 (well
+# above) while MDL reported two. Requiring both to pass therefore rejected
+# every real chunk tested. Until these are calibrated the operator needs to be
+# able to move them without editing code; see the README's open-issues note.
+_EIGENVALUE_DOMINANCE_RATIO = float(os.getenv("SSE_EIGENVALUE_DOMINANCE_RATIO", 3.0))
+
+# Largest MDL source count still treated as "rank-1 is a usable approximation".
+# Raising it to 2 accepts a weak second path rather than withholding the angle.
+_MDL_MAX_SOURCES = int(os.getenv("SSE_MDL_MAX_SOURCES", 1))
 
 
 def _mdl_source_count(eigenvalues_desc, n_snapshots):
@@ -97,7 +112,7 @@ def _signal_subspace_confidence(eigenvalues_asc, n_snapshots):
         return "HIGH" if ratio_says_single_path else "LOW"
 
     mdl_source_count = _mdl_source_count(eigenvalues_desc, n_snapshots)
-    return "HIGH" if (mdl_source_count <= 1 and ratio_says_single_path) else "LOW"
+    return "HIGH" if (mdl_source_count <= _MDL_MAX_SOURCES and ratio_says_single_path) else "LOW"
 
 
 def algo_ca_esprit(v_matrices, nt):
