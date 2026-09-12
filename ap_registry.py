@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
 Module: ap_registry.py
-Merges per-chunk AP metadata (extract_ap_metadata.py's output) into a
-persistent, cross-chunk registry, and derives each AP's Monitor-Card range
-from its own beacon RSSI -- an independently measured third leg of the
-localization triangle (Client-AP bearing from BFI, Client-MonitorCard range
-from client_rssi, AP-MonitorCard range from here), replacing the previously
-fully hardcoded AP position with one leg actually grounded in a measurement.
-The coordinate convention still only needs this distance, not a compass
-bearing to the AP: the local/ego-centric frame is defined with the AP on the
-positive Y-axis by construction (see 4_Stage4_Inference.py).
+Merge per-chunk AP metadata (extract_ap_metadata.py) into a persistent
+registry and derive each AP's range from its own beacon RSSI.
 
-Beacon RSSI is smoothed with a simple exponential moving average across
-chunks (BEACON_RSSI_EMA_ALPHA) rather than used raw per-chunk, so the
-derived AP distance doesn't jitter chunk-to-chunk the way a single
-CHUNK_TIME-second sample would; the smoothing constant is a plain low-pass
-filter, not tied to any particular estimator in the literature.
+That range is the third leg of the localization triangle: client-AP bearing
+from BFI, client-monitor range from client_rssi, AP-monitor range from here.
+Only the distance is needed, not a bearing -- the frame puts the AP on the
+positive Y-axis by construction (4_Stage4_Inference.py).
+
+Beacon RSSI is smoothed across chunks (BEACON_RSSI_EMA_ALPHA) so the derived
+distance does not jitter on a single chunk's sample. Plain low-pass, not tied
+to any published estimator.
 """
 import sys
 import json
@@ -53,18 +49,13 @@ def _new_entry():
 
 def merge_chunk(registry, chunk_metadata, freq_mhz, path_loss_exponent=tx_power_estimator.DEFAULT_PATH_LOSS_EXPONENT):
     """
-    Folds one chunk's extract_ap_metadata.py output into the persistent
-    registry, updating each AP's smoothed beacon RSSI and re-deriving its
-    Monitor-Card distance from that RSSI plus its estimated transmit power.
-    Mutates and returns registry.
+    Fold one chunk's metadata into the registry, updating each AP's smoothed
+    beacon RSSI and re-deriving its distance. Mutates and returns registry.
 
-    The EMA runs in the linear (mW) domain -- stored as beacon_power_ema_mw,
-    converted to dB only when needed -- for the same reason
-    tx_power_estimator.mean_rssi_dbm averages within a chunk that way: each
-    chunk's beacon_rssi_mean is already a correctly-debiased dB figure, but
-    smoothing a *sequence* of dB values across chunks with a plain
-    dB-domain EMA reintroduces the same Jensen's-inequality bias one level
-    up, understating the true average power across chunks.
+    The EMA runs in the linear (mW) domain for the same reason
+    tx_power_estimator.mean_rssi_dbm does: each chunk's beacon_rssi_mean is
+    already debiased, but smoothing a sequence of dB values in the dB domain
+    reintroduces the same Jensen bias one level up.
     """
     for ap_mac, data in chunk_metadata.items():
         entry = registry.setdefault(ap_mac, _new_entry())

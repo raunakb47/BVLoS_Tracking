@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 Module: 2_1_Temporal_Sanitizer.py
-Enforce the Temporal Dropout Threshold (TDT) and uniformly maps tensors and RSSI.
+Split each bucket's packets at gaps longer than the Temporal Dropout Threshold
+(TDT), then resample every surviving segment onto a uniform 100 Hz grid.
 
-TDT_MS must be set larger than the interval at which the AP actually sounds
-its clients, or every packet lands in its own segment, every segment fails the
-4-sample minimum needed for cubic interpolation, and the stage emits nothing.
-Observed BFI cadence varies by well over an order of magnitude between
-captures (roughly 1.5-1.9 s median gaps in the bundled 11ac trace, ~0.1 s in
-the 11ax one), so no single value suits every deployment. Dropped buckets are
-reported on stderr rather than passing silently, because the failure is
-otherwise indistinguishable downstream from "nobody was transmitting".
+TDT_MS must exceed the interval at which the AP actually sounds its clients,
+or every packet lands in its own segment, each fails the 4-sample minimum for
+cubic interpolation, and the stage emits nothing. Measured cadence varies by
+over an order of magnitude between captures (1.5-1.9 s median gaps in the
+bundled 11ac trace, ~0.1 s in the 11ax one), so there is no default that suits
+every deployment. Drops are reported on stderr because downstream they are
+indistinguishable from nobody transmitting.
 """
 import sys
 import numpy as np

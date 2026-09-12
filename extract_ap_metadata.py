@@ -1,58 +1,40 @@
 #!/usr/bin/env python3
 """
 Module: extract_ap_metadata.py
-Extracts AP-side metadata (SSID, advertised max transmit power, and beacon
-RSSI at the monitor card) from Beacon frames in a captured pcap chunk.
+Extract SSID, advertised max transmit power and beacon RSSI from the Beacon
+frames in one pcap chunk.
 
-This is the AP-beacon counterpart to Wi-BFI/main.py's client-side BFI
-extraction: main.py only ever sees Compressed Beamforming Report frames
-(sent client -> AP), so it has no visibility into anything the AP itself
-broadcasts. Every field pulled here is standards-mandated plaintext content
-an AP transmits in the clear, continuously, to every listener regardless of
-association -- capturing it needs only the widened BPF filter in
-1_Stage1_Capture.sh (Beacon/Probe Response added alongside BFI action
-frames), no association or active probing.
+The AP-side counterpart to Wi-BFI/main.py, which only sees Compressed
+Beamforming Reports sent client -> AP and so has no visibility into what the
+AP broadcasts. Everything read here is plaintext an AP transmits continuously
+to every listener, so it needs only the widened BPF filter in
+1_Stage1_Capture.sh, no association or active probing.
 
-Shells out to `tshark -T fields` directly rather than using pyshark's
-FileCapture object model that the sibling main.py uses for BFI extraction:
-field access on pyshark's nested layer objects turned out to be ambiguous
-for these specific fields when tested against a hand-crafted synthetic
-beacon frame -- multiple distinct tagged-parameter fields collapse to the
-same ".all" leaf name one level up in pyshark's layer tree, resolved by
-Python dict-insertion order rather than by which field was actually meant,
-which is exactly the kind of thing that would silently extract the wrong
-value on a different tshark version rather than fail loudly. `tshark -T
-fields -e <name>` sidesteps that layer-object model entirely and is the
-same pattern Wi-BFI's own 2_batch_extract.sh already uses for VHT MIMO
-control fields.
+Shells out to `tshark -T fields` rather than using pyshark's layer objects
+like main.py does: several distinct tagged-parameter fields collapse to the
+same ".all" leaf one level up in pyshark's tree, resolved by dict insertion
+order rather than by which field was meant, which would extract the wrong
+value on a different tshark version instead of failing. Wi-BFI's own
+2_batch_extract.sh uses the same `-T fields` pattern for VHT MIMO control.
 
-Field names verified against a real, hand-crafted 802.11 beacon frame
-(scapy-generated Country + Power Constraint + SSID elements) fed through
-tshark 4.2.2, not assumed from the 802.11 spec text alone:
-  wlan.country_info.fnm.mtpl - Country element's per-subband Maximum
-                                Transmit Power Level (dBm); present
-                                whether or not a Power Constraint element
-                                also is, and not VHT/HE-specific, so this
-                                is the primary source for both 802.11ac
-                                and 802.11ax APs. A Country element can
-                                carry multiple (first-channel, num-channels,
-                                max-power) triplets; the first is used
-                                (-E occurrence=f) rather than matching the
-                                current operating channel specifically, a
-                                simplification documented here rather than
-                                silently made.
-  wlan.powercon.local         - Power Constraint element's local
-                                constraint (dB), subtracted from the
-                                Country element's value per 802.11's
-                                Local Maximum Transmit Power = Country Max
-                                - Power Constraint relation.
-  wlan.ssid                   - hex-encoded SSID bytes, for
-                                hotspot_classifier.py's SSID-pattern signal.
-No HE-specific Transmit Power Envelope field was found in this Wireshark
-version's field dictionary (tshark -G fields), so this does not depend on
-one existing; a VHT-specific field (wlan.vht.tpe.pwr_constr_*) does exist
-but is not used here since the Country/Power-Constraint pair already
-covers both standards generically.
+Field names verified against a hand-crafted 802.11 beacon (scapy Country +
+Power Constraint + SSID elements) through tshark 4.2.2, not read off the spec:
+  wlan.country_info.fnm.mtpl - Country element per-subband Maximum Transmit
+                               Power Level (dBm). Present with or without a
+                               Power Constraint element and not VHT/HE
+                               specific, so it is the primary source for both
+                               11ac and 11ax. A Country element may carry
+                               several (first-channel, num-channels,
+                               max-power) triplets; the first is taken
+                               (-E occurrence=f) rather than matching the
+                               operating channel.
+  wlan.powercon.local        - Power Constraint local constraint (dB),
+                               subtracted per 802.11's Local Maximum Transmit
+                               Power = Country Max - Power Constraint.
+  wlan.ssid                  - hex-encoded SSID bytes for hotspot_classifier.
+No HE Transmit Power Envelope field exists in this Wireshark version's
+dictionary (tshark -G fields); the VHT-specific wlan.vht.tpe.pwr_constr_* does
+but is unused, since Country/Power-Constraint covers both standards.
 """
 import sys
 import json
