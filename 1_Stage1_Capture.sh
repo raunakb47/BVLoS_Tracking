@@ -1,9 +1,8 @@
 #!/bin/bash
 # ==============================================================================
 # Module: 1_Stage1_Capture.sh
-# Purpose: Interfaces directly with the physical NIC to record raw 802.11 RF frames.
-#          Assumes the interface has already been locked to the correct target
-#          frequency and VHT bandwidth.
+# Record raw 802.11 frames to rotating pcap chunks. The interface must already
+# be in monitor mode and locked to the target channel and width.
 # ==============================================================================
 
 
@@ -13,11 +12,8 @@ mkdir -p $WATCH_DIR
 
 echo "[*] Stage 1 (Capture): Initializing RF ingestion on ${CAPTURE_INTERFACE}"
 
-# ------------------------------------------------------------------------------
-# Query the netlink interface to verify the external frequency lock.
-# If this does not explicitly say "80MHz" or "160MHz" alongside the channel,
-# BFI extraction will fail due to payload truncation.
-# ------------------------------------------------------------------------------
+# Verify the external frequency lock. If this does not report the expected
+# width alongside the channel, BFI extraction fails on truncated payloads.
 ACTUAL_FREQ=$(iw dev "$CAPTURE_INTERFACE" info | grep -E "channel|width")
 echo "[*] Interface State: $ACTUAL_FREQ"
 
@@ -25,45 +21,24 @@ echo "[*] Temporal segmentation resolution: ${CHUNK_TIME} seconds."
 echo "[*] Capture filter: ${CAPTURE_FILTER}"
 
 # ------------------------------------------------------------------------------
-# tcpdump: The standard command-line packet analyzer.
-# -i $CAPTURE_INTERFACE : Binds the capture to the specified wireless adapter.
-# -I                    : Enforces Monitor Mode (rfmon). Required to capture raw
-#                         802.11 headers (like BFI Action Frames) without associating
-#                         to an Access Point.
-# -s 0                  : Sets snaplen to 0 (captures the entire packet, preventing
-#                         truncation of the critical V-Matrix payloads).
-# -G $CHUNK_TIME        : The rotation parameter. Instructs tcpdump to automatically
-#                         close the current file and open a new one every X seconds.
-# -W 60                 : Caps how many chunk files one tcpdump run produces before
-#                         it exits (see the restart loop below for why "exits" and
-#                         not "overwrites the oldest").
-# -w .../chunk_%s.pcap  : The output write path. '%s' (lowercase) appends the current
-#                         Unix epoch second -- a monotonically increasing, globally
-#                         unique value -- so restarts (below) can never produce a
-#                         filename collision. The original '%S' (uppercase, seconds-
-#                         within-the-minute, 00-59) wrapped every 60 seconds; verified
-#                         against this system's tcpdump/strftime, that is a real
-#                         filename-collision risk if Stage 2 ever falls more than a
-#                         minute behind, not just a style choice.
-# CAPTURE_FILTER        : BPF filter (config.env) restricting capture at the kernel
-#                         level to Beacon, Probe Response, and Action management
-#                         frames -- the only frame types this pipeline uses -- instead
-#                         of writing every data/control frame in a busy environment to
-#                         disk only to discard almost all of it in Stage 2's pyshark
-#                         display_filter.
-# ------------------------------------------------------------------------------
+# tcpdump flags:
+# -i  capture interface
+# -I  monitor mode (rfmon), required to see 802.11 headers without associating
+# -s 0  full snaplen, so V-matrix payloads are not truncated
+# -G  rotate to a new file every CHUNK_TIME seconds
+# -W 60  file cap per tcpdump run; see the restart loop below
+# -w chunk_%s.pcap  '%s' is the Unix epoch second, monotonic and unique, so a
+#     restart cannot collide with an earlier filename. '%S' (seconds within the
+#     minute) wraps every 60 s and does collide if Stage 2 falls a minute behind.
+# CAPTURE_FILTER  BPF filter (config.env) keeping Beacon, Probe Response and
+#     Action frames only, so a busy environment's data frames are dropped in the
+#     kernel rather than written to disk and discarded in Stage 2.
 #
-# -G combined with -W but WITHOUT -C does NOT implement the circular/overwrite
-# buffer the single-tcpdump-invocation comment above once assumed: verified
-# directly in this session (`tcpdump -i lo -G 2 -W 3 ...` against live loopback
-# traffic) that tcpdump prints "Maximum file limit reached: N" and EXITS once it
-# has written -W files, rather than wrapping around to overwrite the oldest. At
-# this file's default settings (CHUNK_TIME=10, -W 60) that means Stage 1 would
-# silently stop capturing after exactly 10 minutes, regardless of how long the
-# monitoring session is meant to run. The loop below restarts tcpdump every time
-# it exits for any reason (hitting that file cap included), so capture continues
-# for the whole session; Stage 2's inotify watchdog does not care which tcpdump
-# process wrote a given chunk, so a restart is invisible downstream.
+# -G with -W but without -C is not a circular buffer: tcpdump prints "Maximum
+# file limit reached" and exits once it has written -W files. At CHUNK_TIME=10
+# and -W 60 that ends capture after 10 minutes. The loop restarts it on any
+# exit; Stage 2's watchdog does not care which process wrote a chunk.
+# ------------------------------------------------------------------------------
 echo "[*] Starting capture (auto-restarts on exit, e.g. hitting the -W file cap)."
 while true; do
     sudo tcpdump -i "$CAPTURE_INTERFACE" -I -s 0 -G "$CHUNK_TIME" -W 60 \

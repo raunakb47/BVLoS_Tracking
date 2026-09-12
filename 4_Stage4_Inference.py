@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Module: 4_Stage4_Inference.py
-Localization representation placing the Monitor Card at (0,0) and the AP
-on the positive Y-axis.
+Turn Stage 3's per-bucket angles and RSSI into dashboard coordinates, in an
+ego-centric frame with the Monitor Card at (0,0) and the AP on the positive
+Y-axis. Also owns track continuity (TRACK_STATE_FILE), which must be a
+different file from Stage 3's STATE_FILE -- see state_store.py.
 """
 import sys
 import json
@@ -20,28 +22,28 @@ KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 WIFI_CHANNEL = int(os.getenv("WIFI_CHANNEL", 36))
 TRACK_COAST_LIMIT = int(os.getenv("TRACK_COAST_LIMIT", state_store.DEFAULT_COAST_LIMIT))
 
-# Optional path to a real (oui_hex, vendor_name) CSV export -- see
-# hotspot_classifier.load_mobile_oui_table(). Unset by default: the
-# classifier's built-in table is illustrative only (a handful of verified
-# entries out of the 1500+/900+ blocks Apple/Samsung alone hold), so mobile-
-# hotspot classification is UNKNOWN for most real devices until a real table
-# is configured here.
+# Log-distance path loss exponent. 2.0 is free space; indoor NLOS runs higher,
+# and n=2 through walls systematically overestimates range. Set per site once
+# calibration data exists.
+PATH_LOSS_EXPONENT = float(os.getenv("PATH_LOSS_EXPONENT", tx_power_estimator.DEFAULT_PATH_LOSS_EXPONENT))
+
+# Path to a real (oui_hex, vendor_name) CSV export. Unset by default: the
+# built-in table holds a handful of verified entries against the 1500+/900+
+# blocks Apple and Samsung alone register, so classification is UNKNOWN for
+# most devices until a full table is configured here.
 MOBILE_OUI_TABLE_PATH = os.getenv("MOBILE_OUI_TABLE_PATH")
 _MOBILE_OUI_TABLE = (
     hotspot_classifier.load_mobile_oui_table(MOBILE_OUI_TABLE_PATH)
     if MOBILE_OUI_TABLE_PATH else None
 )
 
-# Path to the persistent, cross-chunk AP metadata registry (SSID, transmit
-# power, beacon-RSSI-derived distance) that 2_Stage2_Extraction.sh maintains
-# via extract_ap_metadata.py + ap_registry.py once Beacon/Probe Response
-# capture is enabled (#5/#6). Read fresh each invocation since this process
-# does not own writing it -- Stage 2's watchdog does, once per chunk.
+# Cross-chunk AP registry (SSID, transmit power, beacon-derived distance)
+# written by Stage 2 once per chunk. Read fresh each invocation; this process
+# does not write it.
 AP_REGISTRY_PATH = os.getenv("AP_REGISTRY_PATH")
 
-# Fallback AP-Monitor Card distance (meters) used only until a real
-# measurement is available (see estimate_ap_baseline): this is a placeholder,
-# not a calibrated value, and should not be trusted as ground truth.
+# Fallback AP-to-Monitor-Card distance (m), used until a beacon-derived
+# measurement exists. A placeholder, not a calibrated value.
 DEFAULT_AP_DISTANCE_M = float(os.getenv("DEFAULT_AP_DISTANCE_M", 5.0))
 
 # Monitor Card is ALWAYS the center of the grid
@@ -49,27 +51,17 @@ MC_COORDS = np.array([0.0, 0.0])
 
 def estimate_ap_baseline(ap_mac, ssid=None, ap_distance_m=None):
     """
-    In real-time mode, establishes the Y-Axis baseline dynamically.
+    Place the AP on the Y-axis baseline.
 
-    The coordinate system is defined with the AP on the positive Y-axis by
-    convention (a purely local/ego-centric frame anchored on the monitor
-    card, not an absolute compass bearing), so only the AP's *distance* from
-    the monitor card needs to be established -- no angle-of-arrival at the
-    monitor card is required. ap_distance_m is accepted for forward
-    compatibility with an AP-beacon-RSSI-derived range measurement (an
-    independent third leg of the localization triangle -- Client-AP bearing
-    from BFI, Client-MonitorCard range from client_rssi, and this
-    AP-MonitorCard range from the AP's own overheard Beacon RSSI -- see the
-    #5/#6 capture-filter work); until that capture change lands and supplies
-    a real value, this falls back to DEFAULT_AP_DISTANCE_M, an admitted
-    placeholder rather than a measurement.
+    The frame is ego-centric on the monitor card, not a compass bearing, so
+    only the AP's distance is needed -- no angle-of-arrival at the monitor
+    card. ap_distance_m is the beacon-RSSI-derived range from the registry and
+    forms the third leg of the triangle (client-AP bearing from BFI,
+    client-monitor range from client_rssi, AP-monitor range from beacons);
+    falls back to the DEFAULT_AP_DISTANCE_M placeholder when absent.
 
-    "mobile" is a best-effort classification (see hotspot_classifier.py),
-    not a confirmed device type: the previous check here ("HOT"/"MOB"
-    substrings of a hex MAC address) could never match anything, so every
-    link was silently treated as a fixed AP regardless of what it actually
-    was. ssid is likewise accepted for forward compatibility with
-    Beacon/Probe Response capture and is None until that lands.
+    "mobile" is a best-effort classification (hotspot_classifier.py), not a
+    confirmed device type.
     """
     is_mobile, mobility_confidence, mobility_reason = hotspot_classifier.classify_beamformer(
         ap_mac, ssid=ssid, oui_table=_MOBILE_OUI_TABLE
@@ -85,12 +77,10 @@ def estimate_ap_baseline(ap_mac, ssid=None, ap_distance_m=None):
 
 def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_power_dbm):
     """
-    Geometrically intersects the AP's Angle Ray with the Monitor Card's RSSI Distance Circle.
+    Intersect the AP's angle ray with the monitor card's RSSI distance circle.
+    Returns (client_position, monitor_card_range_m).
     """
-    # tx_power_dbm comes from tx_power_estimator.py rather than being assumed
-    # to be 0 dBm, which the previous abs(client_rssi)-as-path-loss form
-    # implicitly did.
-    r = tx_power_estimator.fspl_distance_m(client_rssi, tx_power_dbm, freq_mhz)
+    r = tx_power_estimator.log_distance_m(client_rssi, tx_power_dbm, freq_mhz, PATH_LOSS_EXPONENT)
 
     rad_ap = np.radians(ap_aod)
     D = np.array([np.sin(rad_ap), np.cos(rad_ap)])
@@ -109,12 +99,18 @@ def ray_circle_intersection(ap_pos, mc_pos, ap_aod, client_rssi, freq_mhz, tx_po
         
     return ap_pos + (t * D), r
 
-def calculate_dynamic_cep(ke, is_mobile):
-    """ Dynamically models error radius based on physics and routing """
+def calculate_dynamic_cep(ke, is_mobile, range_uncertainty_m=0.0):
+    """
+    Error radius (m) from motion, anchor mobility and ranging noise.
+
+    range_uncertainty_m propagates this chunk's RSSI standard deviation through
+    the ranging formula to first order, so a bucket whose RSSI is swinging
+    several dB reports a wider circle than one with a steady reading.
+    """
     base_error = 0.5
     mobility_penalty = 1.5 if is_mobile else 0.0
     kinematic_penalty = min(ke * 10, 2.0)
-    return round(base_error + mobility_penalty + kinematic_penalty, 2)
+    return round(base_error + mobility_penalty + kinematic_penalty + range_uncertainty_m, 2)
 
 def stage4_inference(stage3_json, state_file=None):
     # Perform channel to frequency translation once upon execution
@@ -127,14 +123,12 @@ def stage4_inference(stage3_json, state_file=None):
     registry = ap_registry.load_registry(AP_REGISTRY_PATH) if AP_REGISTRY_PATH else {}
     dashboard_state = {"Occupancy": 0, "Entities": []}
     seen_bucket_keys = []
+    entity_by_bucket = {}
 
     for bucket, data in results.items():
         ke = data["kinematic_energy"]
-        # OS-CFAR (3_2_Kinematic_Tracker.py) gives each bucket its own dynamic
-        # detection threshold once it has accumulated enough kinematic-energy
-        # history; is_occupied_cfar is None before that history exists, in
-        # which case the static global KE_THRESHOLD is used as the cold-start
-        # fallback rather than leaving the bucket undetectable until then.
+        # OS-CFAR gives each bucket its own threshold once it has enough
+        # history; None before then, so KE_THRESHOLD serves as the cold start.
         is_occupied_cfar = data.get("is_occupied_cfar")
         is_occupied = is_occupied_cfar if is_occupied_cfar is not None else (ke > KE_THRESHOLD)
         if is_occupied: dashboard_state["Occupancy"] += 1
@@ -147,14 +141,11 @@ def stage4_inference(stage3_json, state_file=None):
             "UI_Render": {}
         }
 
-        # A LOW-confidence angle (3_1_Spatial_Algorithms._signal_subspace_confidence
-        # detected a second comparably-strong path, so rank-1 does not hold this
-        # chunk) is deliberately NOT turned into a position update: emitting one
-        # anyway would silently blend two propagation paths into a single
-        # confident-looking point. The bucket is left out of seen_bucket_keys so
-        # the coast/hold logic below treats this chunk exactly like a chunk with
-        # no packets at all -- KPVT's occupancy read is still reported, SSE just
-        # sits this one out.
+        # A LOW-confidence angle is not turned into a position update: rank-1
+        # does not hold this chunk, so the angle would blend two paths into one
+        # confident-looking point. Excluded from seen_bucket_keys so the coast
+        # logic below treats it like a chunk with no packets; KPVT's occupancy
+        # read still stands.
         if data["routing"] == "KPVT_AND_SSE" and data.get("aod_confidence") != "LOW":
             seen_bucket_keys.append(bucket)
             ap_mac = data["ap_mac"]
@@ -164,16 +155,18 @@ def stage4_inference(stage3_json, state_file=None):
             )
             ap_pos = ap_info["pos"]
 
-            # client_rssi is the RSSI of the CLIENT's own Compressed Beamforming
-            # Report frame (sent client -> AP, overheard at the monitor card), so
-            # ranging on it needs the client's typical transmit power, not the AP's.
+            # client_rssi is measured on the client's own Compressed Beamforming
+            # Report, so ranging it needs the client's transmit power, not the AP's.
             client_tx_power_dbm, tx_power_source = tx_power_estimator.estimate_client_tx_power_dbm()
 
             client_coords, mc_distance = ray_circle_intersection(
                 ap_pos, MC_COORDS, data["ap_aod"], data["client_rssi"], operating_freq, client_tx_power_dbm
             )
 
-            cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"])
+            range_uncertainty = tx_power_estimator.range_uncertainty_m(
+                mc_distance, data.get("client_rssi_std", 0.0), PATH_LOSS_EXPONENT
+            )
+            cep_radius = calculate_dynamic_cep(ke, ap_info["mobile"], range_uncertainty)
 
             entity["UI_Render"] = {
                 "Tracking_Type": "Ray_Circle_Intersection",
@@ -187,17 +180,18 @@ def stage4_inference(stage3_json, state_file=None):
                     "MC_Distance_m": round(mc_distance, 2)
                 },
                 "Track_Status": "CONFIRMED",
-                # Surfaces which parts of this geometry are actual measurements
-                # vs. literature-typical/placeholder fallbacks, rather than
-                # presenting a single point with no indication of provenance.
+                # Marks which parts of this geometry are measured and which are
+                # literature-typical defaults, so the point is not presented
+                # without provenance.
                 "Calibration": {
                     "Client_TX_Power_dBm": client_tx_power_dbm,
                     "Client_TX_Power_Source": tx_power_source,
                     "AP_Distance_Is_Measured": ap_info["distance_is_measured"],
+                    "Path_Loss_Exponent": PATH_LOSS_EXPONENT,
+                    "Range_Uncertainty_m": round(range_uncertainty, 2),
                 },
-                # is_mobile is a best-effort guess (hotspot_classifier.py), surfaced
-                # with its own confidence/reason rather than presented as fact -- a
-                # dashboard should visibly distinguish this from a measured quantity.
+                # Best-effort guess with its own confidence and reason attached;
+                # a dashboard should render it differently from a measurement.
                 "Anchor_Mobility": {
                     "is_mobile": ap_info["mobile"],
                     "confidence": ap_info["mobility_confidence"],
@@ -205,45 +199,52 @@ def stage4_inference(stage3_json, state_file=None):
                 }
             }
 
-            # Remember this fix so a subsequent chunk with zero packets for this
-            # bucket can still render a (aging) marker instead of the client
-            # abruptly disappearing from the map.
+            # Remembered so a later chunk with no packets for this bucket can
+            # still render an aging marker instead of the client vanishing.
             if state_file:
                 state_store.mark_fix(state_store.get_bucket(state, bucket), client_coords, data["ap_aod"])
 
+        # Indexed by bucket so the coast pass can fill in a held position for a
+        # bucket present in this chunk but without a usable angle, rather than
+        # appending a second entity for the same MAC.
+        entity_by_bucket[bucket] = entity
         dashboard_state["Entities"].append(entity)
 
-    # BFI arrives on whatever cadence the AP happens to sound its clients at;
-    # a bucket producing zero packets for a chunk or two is normal, not a
-    # dropout. Rather than let such a client vanish from the map (or crash on
-    # a KeyError further down the pipeline), hold it at its last confirmed
-    # position -- the standard radar "coast" pattern: predict/hold across
-    # missed detections, drop the track only after TRACK_COAST_LIMIT
-    # consecutive misses. The UI is expected to render a COASTING entity
-    # visibly stale (e.g. greyed out) using Age_Seconds, and to snap it back
-    # to a solid marker the moment a fresh CONFIRMED fix reappears.
+    # A bucket producing no packets for a chunk or two is normal on BFI
+    # cadence, not a dropout, so hold it at its last confirmed position and
+    # drop only after TRACK_COAST_LIMIT consecutive misses. The UI is expected
+    # to grey a COASTING entity by Age_Seconds and snap it back on the next
+    # CONFIRMED fix.
     if state_file:
         surviving = state_store.touch_buckets(state, seen_bucket_keys, coast_limit=TRACK_COAST_LIMIT)
         for bucket_key in surviving:
-            if bucket_key in seen_bucket_keys:
-                continue
             bucket_state = state[bucket_key]
             if bucket_state["track_status"] != "COASTING":
                 continue
             client_mac, ap_mac, pkt_config = bucket_key.split('_')
-            age_s = time.time() - bucket_state["last_seen_ts"]
+            coast_render = {
+                "Tracking_Type": "Ray_Circle_Intersection",
+                "Anchor_MAC": ap_mac,
+                "Client_Coords": bucket_state["last_position"],
+                "Vectors": {"AP_AoD": bucket_state["last_ap_aod"]},
+                "Track_Status": "COASTING",
+                "Age_Seconds": round(time.time() - bucket_state["last_seen_ts"], 1)
+            }
+
+            existing = entity_by_bucket.get(bucket_key)
+            if existing is not None:
+                # Packets this chunk but no accepted angle (LOW SSE confidence).
+                # Keep the entity's KPVT-derived State and attach the held
+                # position; an empty UI_Render would blink the client off the
+                # map on exactly the chunks KPVT is meant to carry.
+                existing["UI_Render"] = coast_render
+                continue
+
             dashboard_state["Entities"].append({
                 "Mac": client_mac,
                 "State": "STALE",
                 "Kinetic_Energy": None,
-                "UI_Render": {
-                    "Tracking_Type": "Ray_Circle_Intersection",
-                    "Anchor_MAC": ap_mac,
-                    "Client_Coords": bucket_state["last_position"],
-                    "Vectors": {"AP_AoD": bucket_state["last_ap_aod"]},
-                    "Track_Status": "COASTING",
-                    "Age_Seconds": round(age_s, 1)
-                }
+                "UI_Render": coast_render
             })
         state_store.save_state(state_file, state)
 

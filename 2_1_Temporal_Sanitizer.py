@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
 Module: 2_1_Temporal_Sanitizer.py
-Enforce the Temporal Dropout Threshold (TDT) and uniformly maps tensors and RSSI.
+Split each bucket's packets at gaps longer than the Temporal Dropout Threshold
+(TDT), then resample every surviving segment onto a uniform 100 Hz grid.
+
+TDT_MS must exceed the interval at which the AP actually sounds its clients,
+or every packet lands in its own segment, each fails the 4-sample minimum for
+cubic interpolation, and the stage emits nothing. Measured cadence varies by
+over an order of magnitude between captures (1.5-1.9 s median gaps in the
+bundled 11ac trace, ~0.1 s in the 11ax one), so there is no default that suits
+every deployment. Drops are reported on stderr because downstream they are
+indistinguishable from nobody transmitting.
 """
 import sys
 import numpy as np
@@ -11,10 +20,13 @@ def enforce_tdt_and_sanitize(raw_npy, tdt_ms):
     data = np.load(raw_npy, allow_pickle=True).item()
     sanitized = {}
     tdt_sec = float(tdt_ms) / 1000.0
+    dropped = []
 
     for bucket_key, packets in data.items():
-        if len(packets) < 4: continue
-            
+        if len(packets) < 4:
+            dropped.append((bucket_key, len(packets), "fewer than 4 packets"))
+            continue
+
         timestamps = np.array([p[0] for p in packets])
         v_matrices = np.array([p[1] for p in packets], dtype=complex)
         rssi_vals = np.array([p[2] for p in packets], dtype=float)
@@ -55,6 +67,17 @@ def enforce_tdt_and_sanitize(raw_npy, tdt_ms):
                 'v_matrices': np.concatenate(sanitized_v, axis=0),
                 'rssi': np.concatenate(sanitized_rssi, axis=0)
             }
+        else:
+            longest = max((len(s) for s in valid_segments), default=0)
+            dropped.append((bucket_key, len(packets),
+                            f"no segment reached 4 samples at TDT={tdt_ms}ms "
+                            f"(longest run {longest}; raise TDT_MS if the AP sounds slower than that)"))
+
+    for bucket_key, n_packets, reason in dropped:
+        print(f"[!] sanitizer dropped {bucket_key} ({n_packets} packets): {reason}", file=sys.stderr)
+    if data and not sanitized:
+        print(f"[!] sanitizer produced no output for any of {len(data)} bucket(s); "
+              f"downstream stages will see an empty chunk", file=sys.stderr)
 
     np.save(raw_npy.replace('_vmatrix.npy', '_sanitized.npy'), sanitized)
 

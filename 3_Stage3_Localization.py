@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """
 Module: 3_Stage3_Localization.py
-Evaluates matrix properties and routes them to the appropriate algorithm.
+Route each bucket to a KPVT/SSE estimator based on its array size, packet
+count and kinematic energy, and write the per-bucket result for Stage 4.
 
-Each invocation of this script handles exactly one rotated pcap chunk and
-then exits, so on its own it has no memory of the chunk before it. That used
-to mean every KPVT/SSE estimate was computed from a single CHUNK_TIME-second
-slice in isolation, with no continuity guarantee across the file-rotation
-boundary. state_store.py gives each MAC/config bucket a small sliding window
-of recent chunks (WINDOW_CHUNKS, persisted in STATE_FILE across invocations),
-so the estimation window is decoupled from the tcpdump rotation cadence: a
-bucket that goes quiet for part of one chunk still has its neighboring
-chunks' samples available, and algorithms that need more than one chunk's
-worth of packets to be stable (KPVT's variance estimate, SSE's covariance
-estimate) get a wider, overlapping-in-effect base to work from.
+One invocation handles one rotated pcap chunk and exits, so continuity comes
+from STATE_FILE (state_store.py): each bucket carries a sliding window of the
+last WINDOW_CHUNKS chunks, so KPVT's variance estimate and SSE's covariance
+estimate are not limited to whatever landed inside one rotation boundary.
 """
 import sys
 import os
@@ -24,6 +18,7 @@ from importlib import import_module
 spatial_algos = import_module('3_1_Spatial_Algorithms')
 state_store = import_module('state_store')
 kinematic_tracker = import_module('3_2_Kinematic_Tracker')
+tx_power_estimator = import_module('tx_power_estimator')
 
 KE_THRESHOLD = float(os.getenv("KE_THRESHOLD", 0.02))
 STARVED_LIMIT = int(os.getenv("PACKET_STARVATION_LIMIT", 15))
@@ -43,14 +38,11 @@ def dispatcher(sanitized_file, out_json, state_file=None):
 
         bucket_state = state_store.get_bucket(state, bucket_key) if state_file else None
 
-        # Fold this chunk's samples into the bucket's sliding window before
-        # running any estimator, so KPVT/SSE see up to WINDOW_CHUNKS chunks
-        # of history instead of only the chunk that just arrived.
+        # Fold this chunk into the sliding window before running any estimator.
         if bucket_state is not None:
-            # 2_1_Temporal_Sanitizer.py resamples onto a fixed 100Hz grid and does not
-            # retain per-sample wall-clock timestamps, so the window is trimmed by
-            # chunk count (WINDOW_CHUNKS) rather than by sample age; the first tuple
-            # slot is reserved for a future per-sample timestamp array if that changes.
+            # The sanitizer resamples onto a fixed 100Hz grid and drops wall-clock
+            # timestamps, so the window is trimmed by chunk count, not sample age.
+            # The first tuple slot is reserved for timestamps if that changes.
             state_store.push_window_sample(
                 bucket_state, None, payload['v_matrices'], payload['rssi'],
                 window_chunks=WINDOW_CHUNKS
@@ -61,22 +53,23 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             v_matrices = payload['v_matrices']
             rssi_window = payload['rssi']
 
-        client_rssi = float(np.mean(rssi_window))
+        # Averaged in the linear (mW) domain: a mean of dB readings from a
+        # fading signal sits below the dB of the true mean power (Jensen), which
+        # reads as extra path loss and overestimates range downstream. rssi_std
+        # feeds range_uncertainty_m in Stage 4, so a noisier chunk widens the
+        # reported position uncertainty rather than being dropped.
+        client_rssi = tx_power_estimator.mean_rssi_dbm(rssi_window)
+        client_rssi_std = float(np.std(rssi_window))
 
-        # kpvt_module uses the bucket's carried-over VSS-LMS background estimate
-        # when state is available (see 3_2_Kinematic_Tracker.py), falling back to
+        # Uses the carried-over VSS-LMS background when state is available,
         # a static per-chunk mean otherwise.
         ke = kinematic_tracker.kpvt_module(v_matrices, bucket_state)
         packets = v_matrices.shape[0]
 
-        # OS-CFAR: estimate this bucket's own dynamic detection threshold from
-        # its recent kinematic-energy history *before* this chunk's value is
-        # folded in, so the decision for this chunk isn't influenced by itself.
-        # Runs alongside (not instead of) the static KE_THRESHOLD comparison
-        # Stage 4 already makes: is_occupied_cfar is None (Stage 4 falls back
-        # to the static threshold) until enough reference history accumulates,
-        # then takes over as a per-bucket, self-calibrating alternative to one
-        # constant applied uniformly across every bucket and environment.
+        # Threshold is computed from the reference history BEFORE this chunk's
+        # value is folded in, so the decision is not influenced by itself.
+        # is_occupied_cfar stays None until enough history accumulates; Stage 4
+        # falls back to the static KE_THRESHOLD until then.
         cfar_threshold, is_occupied_cfar = None, None
         if bucket_state is not None:
             cfar_threshold = kinematic_tracker.os_cfar_threshold(
@@ -97,12 +90,9 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             elif ke < KE_THRESHOLD: algo_name = "SPOTFI"
             else: algo_name = "RES_2D_MUSIC" if nt >= 3 else "CA_ESPRIT"
 
-            # Every SSE_REGISTRY entry reports its own confidence alongside the
-            # angle: a HIGH-confidence estimate means the array's eigenvalue
-            # spectrum actually looks like one dominant path (the assumption
-            # the underlying math relies on); LOW means a second comparably
-            # strong path was present, so the angle is likely a multipath
-            # blend rather than the true AoD. See 3_1_Spatial_Algorithms.py.
+            # confidence is HIGH when the eigenvalue spectrum supports the
+            # rank-1 assumption the estimator relies on, LOW when a second
+            # comparable path makes the angle a likely multipath blend.
             ap_aod, aod_confidence = spatial_algos.SSE_REGISTRY[algo_name](v_matrices, nt)
 
         results[bucket_key] = {
@@ -116,7 +106,8 @@ def dispatcher(sanitized_file, out_json, state_file=None):
             "is_occupied_cfar": is_occupied_cfar,
             "ap_aod": ap_aod,
             "aod_confidence": aod_confidence,
-            "client_rssi": client_rssi
+            "client_rssi": client_rssi,
+            "client_rssi_std": client_rssi_std
         }
 
     if state_file:

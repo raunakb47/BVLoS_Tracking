@@ -1,61 +1,44 @@
 #!/usr/bin/env python3
 """
 Module: 3_1_Spatial_Algorithms.py
-Spatial Subspace Extractor (SSE) algorithms.
+Spatial Subspace Extractor (SSE) angle-of-departure estimators.
 
-CA-ESPRIT, SpotFi and Residual 2D-MUSIC all previously hardcoded a rank-1
-signal-subspace assumption (top eigenvector = the entire signal, everything
-else = noise), regardless of what the actual eigenvalue spectrum looked like.
-That assumption is only valid when exactly one propagation path dominates the
-observation; through-wall/indoor multipath -- the framework's own target
-scenario -- routinely violates it, and a rank-1 estimate computed on a
-multi-path-contaminated covariance matrix reports whichever path happens to
-be instantaneously strongest, not necessarily the direct line-of-sight path.
-
-_signal_subspace_confidence() below estimates whether that assumption was
-actually justified for a given covariance matrix, using the array's own
-eigenvalue spectrum, and every eigen-decomposition-based algorithm now
-returns (ap_aod, confidence) instead of a bare angle. Stage 3 uses the
-confidence flag to decide whether this chunk's angle is trustworthy enough to
-update a client's tracked position, or whether the estimate should be
-withheld this chunk (deferring to KPVT's occupancy signal and the previous
-confirmed position) -- i.e. KPVT and SSE operate as complementary signals
-rather than a strict "SSE always wins when it runs" pipeline.
+Every estimator returns (ap_aod_degrees, confidence). The eigen-decomposition
+methods split the covariance matrix at rank 1, which only holds when one
+propagation path dominates; indoor/through-wall multipath often breaks that,
+and a rank-1 split on a two-path covariance returns whichever path is
+momentarily strongest. The confidence flag reports whether the split was
+justified for this chunk, and Stage 4 withholds the position update when it
+is not.
 """
+import os
+
 import numpy as np
 from scipy import linalg
 
-# Wax-Kailath MDL source-count test requires two leftover "noise-only"
-# eigenvalues to compare (see _signal_subspace_confidence docstring); below
-# this many antenna elements the test is structurally degenerate, and a
-# plain eigenvalue-ratio heuristic is used instead.
+# MDL needs two leftover noise eigenvalues to compare, so it is degenerate
+# below 3 elements; the ratio check is used alone there.
 _MDL_MIN_ELEMENTS = 3
 
-# Minimum ratio between the strongest and second-strongest eigenvalue for a
-# single dominant path to be considered established. This is a pragmatic
-# threshold (roughly a 5x/7dB power gap), not a literature-derived constant --
-# unlike the MDL test, there is no standard closed-form P_fa for it, so treat
-# it as a tunable gate rather than a statistically calibrated one.
-_EIGENVALUE_DOMINANCE_RATIO = 3.0
+# Both gates are env-overridable and NEITHER is calibrated against labelled
+# captures. They disagree on real data: the bundled 11ac 3x1 trace gives
+# eigenvalue ratios of 1.6-1.8 with MDL reporting one source, the 11ax 4x2
+# trace gives 5.9-15.4 with MDL reporting two. Requiring both to pass rejects
+# every chunk of both. Defaults below are placeholders pending calibration.
+_EIGENVALUE_DOMINANCE_RATIO = float(os.getenv("SSE_EIGENVALUE_DOMINANCE_RATIO", 3.0))  # ~7 dB power gap
+_MDL_MAX_SOURCES = int(os.getenv("SSE_MDL_MAX_SOURCES", 1))  # 2 accepts a weak second path
 
 
 def _mdl_source_count(eigenvalues_desc, n_snapshots):
     """
-    Wax & Kailath, "Detection of Signals by Information Theoretic Criteria,"
-    IEEE Trans. ASSP, vol. 33, no. 2, pp. 387-392, 1985 -- the standard
-    eigenvalue-based source-count estimator for narrowband array processing.
+    Estimate the number of sources by minimum description length.
+    Wax & Kailath, IEEE Trans. ASSP 33(2):387-392, 1985.
 
-    For an M-element array and a hypothesis of k signal sources, the (M-k)
-    smallest eigenvalues should all equal the noise floor; MDL(k) scores how
-    close their geometric/arithmetic mean ratio is to 1 (a perfectly flat
-    noise floor) against a complexity penalty that grows with k, and the
-    number of sources is estimated as argmin_k MDL(k).
-
-    The test is only informative while at least 2 eigenvalues remain in the
-    "noise" hypothesis (M - k >= 2): with exactly one remaining eigenvalue,
-    its geometric and arithmetic mean are trivially identical, so that
-    hypothesis always scores a perfect (and meaningless) fit. k is therefore
-    only searched over the range where M - k >= 2.
+    Under a k-source hypothesis the M-k smallest eigenvalues should all sit at
+    the noise floor; MDL(k) scores the flatness of that tail against a penalty
+    growing with k. k is searched only while M-k >= 2: with one eigenvalue left
+    its geometric and arithmetic means are trivially equal and the hypothesis
+    always scores a perfect, meaningless fit.
     """
     m = len(eigenvalues_desc)
     best_k, best_mdl = 0, np.inf
@@ -74,20 +57,12 @@ def _mdl_source_count(eigenvalues_desc, n_snapshots):
 
 def _signal_subspace_confidence(eigenvalues_asc, n_snapshots):
     """
-    Decide whether a rank-1 signal-subspace split is justified for this
-    covariance matrix. Returns "HIGH" when the data looks like a single
-    dominant path (rank-1 valid, matching the algorithms' existing math) and
-    "LOW" when a second comparably-strong path is present (rank-1 would blend
-    two paths together and the resulting angle should not be trusted as a
-    position update).
+    Return "HIGH" if a rank-1 split is justified for this covariance matrix,
+    "LOW" if a second comparably-strong path is present.
 
-    Below _MDL_MIN_ELEMENTS antennas, Wax-Kailath MDL cannot distinguish "1
-    path" from "2+ paths" at all (see _mdl_source_count) -- a 2-element array
-    (this framework's most common configuration) only ever has one testable
-    hypothesis under MDL, which is a real ceiling on what any subspace method
-    can resolve on that little aperture, not a bug in this implementation.
-    The eigenvalue-ratio check is applied regardless of array size as a
-    cruder but always-available fallback signal.
+    On a 2-element array MDL has only one testable hypothesis and cannot
+    separate one path from several. That is an aperture limit, not an
+    implementation gap; the ratio check runs at every array size.
     """
     eigenvalues_desc = np.sort(eigenvalues_asc)[::-1]
     dominance_ratio = eigenvalues_desc[0] / max(eigenvalues_desc[1], 1e-15)
@@ -97,7 +72,7 @@ def _signal_subspace_confidence(eigenvalues_asc, n_snapshots):
         return "HIGH" if ratio_says_single_path else "LOW"
 
     mdl_source_count = _mdl_source_count(eigenvalues_desc, n_snapshots)
-    return "HIGH" if (mdl_source_count <= 1 and ratio_says_single_path) else "LOW"
+    return "HIGH" if (mdl_source_count <= _MDL_MAX_SOURCES and ratio_says_single_path) else "LOW"
 
 
 def algo_ca_esprit(v_matrices, nt):
@@ -153,10 +128,9 @@ def algo_iaa_apes(v_matrices, nt):
             denom = float(np.real(np.dot(np.dot(a.conj().T, R_inv), a)[0, 0]))
             if denom > 0: p_spec[i] = np.abs(np.dot(np.dot(a.conj().T, R_inv), v_snap.reshape(-1, 1))[0, 0] / denom)**2
 
-    # Single-snapshot method: there is no eigenvalue spectrum to gate on here,
-    # and it is only ever selected for the already-sparse-data branch (see the
-    # dispatcher's STARVED_LIMIT routing), so its own reliability is already
-    # signaled by why it was chosen rather than by a distinct data-driven check.
+    # Single snapshot, so no eigenvalue spectrum to gate on. Fixed MEDIUM: the
+    # dispatcher only selects this on the starved-packet branch, so the reason
+    # to distrust it is already known from the routing.
     return float(np.degrees(grid[np.argmax(p_spec)])), "MEDIUM"
 
 def algo_res_2d_music(v_matrices, nt):
