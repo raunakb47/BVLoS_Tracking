@@ -44,6 +44,8 @@ def _new_bucket_state():
         "window": [],                  # list of (timestamps, v_matrices, rssi) tuples, oldest first, one per chunk
         "lms_background": None,        # VSS-LMS complex background estimate, shape matches one v_matrix entry
         "lms_mu": None,                # VSS-LMS current per-bucket step size
+        "lms_floor_history": [],       # recent per-sample residual powers, floor estimate for the step-size rule
+        "lms_floor_hold": 0,           # consecutive samples withheld from that history as suspected motion
         "cfar_reference": [],          # rolling kinematic-energy reference window consumed by OS-CFAR
         "last_position": None,         # [x, y] of the most recent accepted SSE fix
         "last_ap_aod": None,           # AoD (degrees) backing that fix, retained for the UI vector display

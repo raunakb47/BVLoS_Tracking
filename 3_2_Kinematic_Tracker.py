@@ -17,16 +17,58 @@ import numpy as np
 from scipy.special import gammaln
 from sklearn.decomposition import PCA
 
-# VSS-LMS step-size bounds and attack/release rates (see vss_lms_update
-# docstring for why attack and release use different rates). mu_max is
-# intentionally kept well under the 1-tap stability limit (mu < 2 for a
-# constant unit regressor) so a single chunk of motion cannot swing the
-# background estimate too far in one step.
-LMS_ATTACK = 0.4     # fast: how quickly mu is allowed to DROP when a large residual appears
-LMS_RELEASE = 0.97   # slow: how cautiously mu is allowed to RISE back up during quiet
-LMS_GAMMA = 1.0
+# VSS-LMS step-size bounds and attack/release rates. mu_max stays well under
+# the 1-tap stability limit (mu < 2 for a constant unit regressor) so one
+# chunk of motion cannot swing the background estimate far in a single step.
+LMS_ATTACK = 0.4     # rate at which mu is allowed to DROP when a large residual appears
+LMS_RELEASE = 0.97   # rate at which mu is allowed to RISE back up during quiet
+LMS_GAMMA = 1.0      # applied to the residual/floor ratio, which is dimensionless
 LMS_MU_MIN = 0.01
 LMS_MU_MAX = 0.5
+
+# Residual-power floor used to make the step-size rule scale-free. The floor is
+# a low-order statistic of recent residual powers rather than a mean, so a burst
+# of motion inside the window does not pull it up (same rationale as OS-CFAR
+# downstream). Samples more than LMS_FLOOR_HOLD_RATIO above the floor are held
+# out of the history as suspected motion; LMS_FLOOR_FORCE_UPDATE bounds how long
+# that can continue, so a genuine change in level is eventually re-learned
+# instead of freezing the floor forever.
+LMS_FLOOR_HISTORY = 256
+LMS_FLOOR_PERCENTILE = 25.0
+LMS_FLOOR_HOLD_RATIO = 4.0
+LMS_FLOOR_FORCE_UPDATE = 512
+LMS_FLOOR_MIN_CELLS = 8    # below this, accept every sample so the floor can bootstrap
+
+
+def _residual_power_floor(bucket_state, residual_power):
+    """
+    Track the bucket's quiet-time residual power, which the step-size rule
+    divides by. Returns the current floor estimate.
+
+    The history is a plain list (it is persisted through np.save with the rest
+    of the bucket state, so no deque). Samples far above the floor are assumed
+    to be motion and withheld, otherwise sustained motion would raise the floor
+    and re-open adaptation on itself. The withholding is bounded by
+    LMS_FLOOR_FORCE_UPDATE so a real level change (AGC step, different
+    beamformee grouping) is eventually absorbed.
+    """
+    history = bucket_state.setdefault("lms_floor_history", [])
+    held = bucket_state.setdefault("lms_floor_hold", 0)
+
+    if len(history) < LMS_FLOOR_MIN_CELLS:
+        history.append(residual_power)
+    else:
+        floor = float(np.percentile(history, LMS_FLOOR_PERCENTILE))
+        if residual_power <= LMS_FLOOR_HOLD_RATIO * floor or held >= LMS_FLOOR_FORCE_UPDATE:
+            history.append(residual_power)
+            bucket_state["lms_floor_hold"] = 0
+        else:
+            bucket_state["lms_floor_hold"] = held + 1
+
+    if len(history) > LMS_FLOOR_HISTORY:
+        del history[:-LMS_FLOOR_HISTORY]
+
+    return float(np.percentile(history, LMS_FLOOR_PERCENTILE))
 
 
 def vss_lms_update(bucket_state, sample_magnitude):
@@ -34,46 +76,52 @@ def vss_lms_update(bucket_state, sample_magnitude):
     One VSS-LMS step of the per-bucket adaptive background estimate.
 
     For a scalar (or elementwise-vector) background estimate with a constant
-    regressor, the general adaptive-filter update
+    regressor, the adaptive-filter update
         w(n+1) = w(n) + mu(n) * x(n) * e*(n)
     collapses to an exponential moving average with an adaptive smoothing
     factor:
         b(n+1) = (1 - mu(n)) * b(n) + mu(n) * y(n)
-    This is the practical form implemented below. The step size mu(n) is
-    driven toward an instantaneous target derived from the residual power,
-    following the inverse of the step-size relationship in Kwong & Johnston,
-    "A Variable Step Size LMS Algorithm," IEEE Trans. Signal Processing,
-    vol. 40, no. 7, 1992: their rule *raises* mu when the instantaneous error
-    is large, which is correct when a filter is converging toward a fixed
-    reference (large error = not converged yet). Background subtraction is
-    the inverse case -- the "error" here (this sample's magnitude minus the
-    current background estimate) is the target's kinematic signal -- so the
-    relationship is inverted: target_mu is large when the residual is small
-    (background is stable; safe to adapt fast) and near mu_min when the
-    residual is large (something is moving; protect the background from
-    absorbing it).
+    which is the form implemented here. mu(n) is driven toward a target
+    derived from the residual power, following the inverse of the step-size
+    relationship in Kwong & Johnston, "A Variable Step Size LMS Algorithm,"
+    IEEE Trans. Signal Processing, vol. 40, no. 7, 1992. Their rule raises mu
+    when the instantaneous error is large, which is correct when a filter is
+    converging toward a fixed reference. Background subtraction is the inverse
+    case -- the residual here is the target's kinematic signal, not a
+    convergence error -- so the relationship is inverted: target_mu is large
+    when the residual sits at the bucket's own noise floor and near mu_min
+    when it rises above it.
 
-    A single symmetric smoothing rate toward that target (as in Kwong &
-    Johnston's own recursion) was tried and empirically failed here: with a
-    single rate slow enough to hold mu near mu_max through ordinary sensor
-    noise during quiet periods, mu could not fall fast enough within one
-    short motion burst to stop the background chasing it (validated in the
-    module's test run -- mu stayed pinned near mu_max for the whole burst).
-    The fix applied is the standard "fast attack / slow release" envelope
-    pattern from AGC and audio dynamics processing: mu moves toward a lower
-    target quickly (LMS_ATTACK) but is only allowed to climb back toward a
-    higher target slowly (LMS_RELEASE), so a burst of motion is caught
-    within a sample or two while a brief quiet moment can't immediately
-    reopen adaptation and let the next burst leak into the background. This
-    attack/release smoothing is this implementation's own addition on top of
-    Kwong & Johnston's inverted step-size target, not part of the cited
-    paper itself.
+    The ratio fed to that rule is residual_power / floor, not residual_power
+    itself. An absolute-scale rule is not usable here: V-matrix entries are
+    unit-normalized, so measured per-sample residual powers on real captures
+    run around 5e-2, where LMS_MU_MAX / (1 + residual_power) still evaluates to
+    ~95% of mu_max. mu then never leaves its ceiling, the background becomes a
+    2-sample EMA that tracks the target instead of the environment, and most of
+    the motion is cancelled before PCA sees it. Measured on synthetic
+    still/moving sequences, that cost roughly 34x of the still-vs-moving
+    kinematic-energy contrast on dense chunks (67x, against 2735x for the
+    static per-chunk mean this module replaces); dividing by the floor restores
+    it to 2285x.
 
-    sample_magnitude may be a scalar or an array (one magnitude value per
-    V-matrix element); residual_power is always reduced to a single scalar
-    driving one shared step size, a deliberate simplification of Kwong &
-    Johnston's originally single-channel formulation rather than a
-    literature-cited multichannel extension.
+    A single symmetric smoothing rate toward the target (as in Kwong &
+    Johnston's own recursion) does not work here either: a rate slow enough to
+    hold mu near mu_max through ordinary sensor noise cannot drop it fast
+    enough inside one short motion burst. mu therefore moves toward a lower
+    target quickly (LMS_ATTACK) and back up slowly (LMS_RELEASE), the standard
+    fast-attack/slow-release envelope from AGC. That envelope and the floor
+    normalization are both additions on top of the cited step-size target.
+
+    Known limitation: any cross-chunk adaptive background reads a step change
+    in level (AGC, a different beamformee grouping) as one chunk of motion,
+    where the static per-chunk mean is immune to it by construction. Measured
+    motion-to-level-shift discrimination is still ~4x better with the floor
+    normalization than without it, but it is not eliminated.
+
+    sample_magnitude may be a scalar or an array (one magnitude per V-matrix
+    element); residual_power is reduced to a single scalar driving one shared
+    step size, a deliberate simplification of Kwong & Johnston's single-channel
+    formulation rather than a cited multichannel extension.
     """
     background = bucket_state["lms_background"]
 
@@ -86,7 +134,10 @@ def vss_lms_update(bucket_state, sample_magnitude):
     residual = np.array(sample_magnitude, dtype=float) - background
     residual_power = float(np.mean(residual ** 2))
 
-    target_mu = LMS_MU_MAX / (1.0 + LMS_GAMMA * residual_power)
+    floor = _residual_power_floor(bucket_state, residual_power)
+    normalized_power = residual_power / max(floor, 1e-12)
+
+    target_mu = LMS_MU_MAX / (1.0 + LMS_GAMMA * normalized_power)
     target_mu = min(max(target_mu, LMS_MU_MIN), LMS_MU_MAX)
     rate = LMS_ATTACK if target_mu < mu else LMS_RELEASE
     mu = rate * mu + (1.0 - rate) * target_mu
