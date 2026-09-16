@@ -10,6 +10,11 @@ both on branch `claude/sweet-cerf-p09l7d`:
 Numbers marked **[m]** were measured in the session that produced this file.
 Unmarked numbers carry over from earlier sessions and are listed in section 6.
 
+**Attribution discipline.** A position is attributed to the user only where
+section 5 marks it **DECIDED** and quotes them. Everything else in this file is
+a measurement or a proposal that the user has not ruled on, and must not be
+restated later as something the user said, asked for, or expected.
+
 ---
 
 ## 1. Objectives
@@ -381,8 +386,9 @@ exercise the pipeline without hardware.
 15–30 minutes on the target channel, beacons included. Settles three things at
 once: whether the network produces 11ax feedback at all (the VHT-only filter has
 been hiding it); whether any of it is MU, which closes the last open question in
-the 11ax MU path; and whether any client is **jointly visible to two APs**, which
-is what takes the geometry from deficit 5 to deficit 2 (section 5.6).
+the 11ax MU path; and how many distinct APs are sounding on the captured channel,
+and with which clients — the quantity the identifiability rows in 5.6 and 5.6a
+are indexed by.
 
 ### 4.3 Build the observable log, drop pyshark from the hot path
 
@@ -421,9 +427,20 @@ accuracy against effective BFI count rather than wall time.
 
 ---
 
-## 5. Decisions from this session
+## 5. Session record
 
-### 5.1 Per-stream SNR — ADOPTED, landed in `c1d8d30`
+Two different kinds of entry, marked so they are not confused:
+
+- **DECIDED** — the user directed it, or approved it explicitly. Settled.
+- **FINDING** — a measurement produced in this session and reported. Not put to
+  the user, not confirmed by the user. Treat as evidence to weigh, not as a
+  ruling, and do not cite it as something the user agreed.
+
+
+### 5.1 Per-stream SNR — landed in `c1d8d30`
+
+*Status: landed in answer to the user's question about whether `packet_snr`
+would be available. Not explicitly directed, not objected to.*
 
 Upstream slices `packet_snr` and never reads it; the fork inherited the dead
 assignment. Now decoded and stored. `dB = 22 + 0.25 × int8`, checked against
@@ -432,11 +449,17 @@ mismatches **[m]**. Kept where the per-chain list was initially dropped because
 it is a *different observable*, not more detail on RSSI — it is the only figure
 in the frame describing the AP→client path.
 
-### 5.2 Monitor radiotap RSSI — KEPT (was never removed)
+### 5.2 Monitor radiotap RSSI — DECIDED, kept (was never removed)
+
+*User: "lets keep the radiotap rssi for later use in bvlos".*
 
 Element 3, 100 % coverage on the live capture, 0 unmeasured across all buckets **[m]**.
 
-### 5.3 Per-chain radiotap list — STORED as raw data, EXCLUDED from geometry
+### 5.3 Per-chain radiotap list — DECIDED to store; exclusion from geometry not ruled on
+
+*User: "land the storage change only" — that is the storage decision. The
+recommendation to keep it out of the geometry was argued and questioned by the
+user, and the user did not state a ruling either way.*
 
 Landed in `2b61ec3`. The investigation and its verdicts:
 
@@ -487,7 +510,7 @@ change** — two antennas with deliberately different patterns (tilted or
 orthogonal dipoles) give a calibratable `f(x)`; or a card with CSI extraction
 gives per-chain phase.
 
-### 5.4 RSSI averaging has a floor — CONSTRAINT, not a fix
+### 5.4 RSSI averaging has a floor — FINDING, not reviewed
 
 sd of window means, live capture **[m]**:
 
@@ -505,7 +528,9 @@ blind figure. At 0.05–0.6 BFI/s, W=16 already costs 30 s to 5 minutes.
 
 **Consequence:** "collect more packets" is not the lever for ranging accuracy.
 
-### 5.5 Beacons — ADOPTED into the plan, not yet implemented
+### 5.5 Beacons — DECIDED, in the plan, not yet implemented
+
+*User: "Include the inclusion of beacons in the plan".*
 
 The APs never transmit beamforming reports. Live capture **[m]**:
 
@@ -523,7 +548,7 @@ two orders of magnitude, and the only one referenced to the monitor's position
 that describes the AP. Added to the Stage 1 filter in section 4.1. Beacons also
 carry SSID, BSSID and advertised transmit power, already consumed by `observe.py`.
 
-### 5.6 Identifiability — CONSTRAINT on what Stage 4 can output
+### 5.6 Identifiability of the static single-AP model — FINDING, not reviewed
 
 Jacobian rank of the observation model (monitor at origin, RSSI to clients and
 AP, AoD at the AP). Deficit = unknowns − rank; above 0 means a continuum of
@@ -537,8 +562,10 @@ solutions fits the data *exactly*, at any noise level **[m]**.
 | 3 clients, one shared EIRP | 12 | 7 | 5 |
 | 20 clients, one shared EIRP | 46 | 41 | **5** |
 
-**Adding clients never helps** — each contributes 2 equations and 2 unknowns,
-exactly neutral. With realistic per-device transmit powers it gets worse.
+A property of the model worth recording: the deficit does not fall as clients
+are added, because each client contributes 2 equations and 2 unknowns and is
+exactly neutral. With per-device transmit powers it rises. Stated as a property
+of the model, not as a correction to anyone's expectation.
 
 Null-space projection names the unresolved directions **[m]**:
 
@@ -571,14 +598,33 @@ determined in shape, unknown in orientation and size.** That is a real
 deliverable — relative geometry, proximity, which side of the AP a device sits
 on. It is not absolute coordinates.
 
-What ties two APs together is **clients jointly visible to both** — a second
-bearing to the same point. The live capture has zero: 307 reports to one AP, 8 to
-the other, no client in common.
+**A relative map up to rotation and scale was the intended product from the
+outset.** This measurement does not change the target; it names which two gauges
+are free and shows they are exact symmetries rather than accuracy limits, so no
+estimator effort can recover them and none should be spent trying.
 
-**Stage 4 must therefore label its output as a relative map up to rotation and
-scale**, not absolute coordinates, unless `site.json` is present.
+### 5.6a Correction to 5.6: what the two-AP row actually requires
 
-### 5.7 Absolute ToF is structurally absent from BFI — SETTLED
+The model above gave a client a bearing from each AP that "sees" it. **That is
+the wrong condition.** A compressed beamforming report is sent only to the AP
+that sounded the client, which is the AP it is associated with. Visibility to
+other APs — which is normal, and was never in question — produces no beamforming
+report to those APs and therefore no second AoD. A client associates with one AP
+at a time, so on a single captured channel the usual case is one AoD per client,
+from its own AP.
+
+The two-AP row therefore describes a case requiring the *same* client to be
+sounded by *two* APs on the captured channel. Within one session that arises only
+on a roam, and is useful only if the client is stationary across it. It is a
+narrow case, not a property of the environment and not something a capture choice
+selects for. **The monitor-from-two-places row is the reachable route to deficit
+2**, and that is the calibration walk, which is optional by design.
+
+The live capture's split — 307 reports to one AP, 8 to another — reflects which
+APs were sounding on the captured channel. It says nothing about which APs the
+clients could see.
+
+### 5.7 Absolute ToF is structurally absent from BFI — FINDING, not reviewed
 
 The rank test shows ToF is exactly the missing ingredient (deficit 5 → 1). It is
 not obtainable. A propagation delay multiplies every entry of `H(f)` by one
@@ -592,12 +638,17 @@ max |imag(last row of V)| = 0.00e+00      min real(last row) = +0.0292
 
 Exactly real and non-negative on every subcarrier of every report. Literature
 describes the same: BFI is the SVD of CSI "discarding amplitude and absolute
-phase". **Do not plan any absolute-range leg on BFI.** What survives is AoD and
-relative multipath delay structure.
+phase". What survives in BFI is AoD and relative multipath delay structure.
 
-### 5.8 Correction to an earlier statement in this session
+Status: measured and reported in this session; **the user has not reviewed or
+ruled on it.** It bears on whether any absolute-range leg can rest on BFI, which
+remains the user's call.
 
-An earlier claim that monitor RSSI "pins the transform down" was too strong. It
+### 5.8 Corrections to statements made in this session
+
+Recorded so they are not carried forward as established.
+
+**"Monitor RSSI pins the transform down."** Too strong. It
 fixes translation only — trivially, by placing the monitor at the origin — and
 leaves rotation and scale exactly unobservable (5.6).
 
@@ -659,8 +710,9 @@ Carried from earlier sessions unless marked **[m]** (this session).
    number pins the real value.
 3. **Whether the target network produces HE feedback at all** — hidden until now
    by the VHT-only filter.
-4. **Whether any client is jointly visible to two APs** — determines whether the
-   deficit-2 route is reachable without a monitor walk (5.6).
+4. **How many APs are sounding on the captured channel, and whether any client
+   is sounded by more than one of them within a session** (5.6a). An observation
+   to make, not a requirement placed on the environment.
 5. **Whether the λ/2 ULA assumption holds on a real AP.** Only ground truth
    settles it, which is why raw V-matrices stay in the log.
 6. **Whether AoD from V maps to physical bearing on a real AP** — untested.
@@ -680,15 +732,18 @@ Carried from earlier sessions unless marked **[m]** (this session).
     cannot touch the rotation and scale gauges, which are exact symmetries, but
     could close some of the remaining 3.
 
-**Considered and discarded**
-- Monitor-side AoA from chain amplitude ratio (5.3).
-- Chain differential as an association feature (5.3).
-- Averaging more packets to improve ranging accuracy (5.4).
-- Adding more clients to resolve the geometry (5.6).
-- Any absolute-range leg derived from BFI (5.7).
-- root-MUSIC, ESPRIT/CA-ESPRIT (section 3).
+**Settled in the approved plan** — discussed with the user and agreed:
+- root-MUSIC, ESPRIT/CA-ESPRIT dropped from the estimator set (section 3).
 - Kinematic energy, KPVT, OS-CFAR, occupancy counter, CEP heuristic,
   resampling, TDT, state store, hotspot classifier (section 3, Removed).
+
+**Measured against and not pursued — my own exploration, never put to the user
+as an option and never ruled on by the user.** Recorded so the measurement is
+not repeated, not as a closed question:
+- Monitor-side AoA from the chain amplitude ratio (5.3).
+- The chain differential as an association feature (5.3).
+- Averaging more packets to improve ranging accuracy (5.4).
+- Any absolute-range leg resting on BFI (5.7).
 
 ---
 
@@ -706,8 +761,10 @@ Carried from earlier sessions unless marked **[m]** (this session).
 - **Not implemented, deliberately:** coarser subcarrier groupings, HE feedback
   scoped to a narrow resource unit, VHT 160 MHz. Each is skipped with a
   diagnostic rather than guessed.
-- **The output is a relative map up to rotation and scale** without `site.json`
-  or a two-AP overlap (5.6).
+- **Rotation and scale are exact symmetries of the observation set** without
+  `site.json` (5.6). The relative map was always the intended product; what is
+  new is that these two gauges are provably unrecoverable rather than merely
+  hard, so no estimator work should be aimed at them.
 
 ---
 
