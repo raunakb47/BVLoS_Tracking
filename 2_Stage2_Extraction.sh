@@ -7,7 +7,9 @@ source ./config.env
 
 echo "[*] Stage 2: Extraction Dispatcher Active. Watching for chunks..."
 
-inotifywait -m -e close_write --format "%w%f" "$WATCH_DIR" | while read -r NEW_PCAP
+# Both events are needed, one per delivery mechanism: tcpdump closes a rotated
+# chunk (close_write), while 0_replay_pcap.sh renames one in (moved_to).
+inotifywait -m -e close_write,moved_to --format "%w%f" "$WATCH_DIR" | while read -r NEW_PCAP
 do
     if [[ "$NEW_PCAP" != *.pcap ]]; then continue; fi
     BASE=$(basename "$NEW_PCAP" .pcap)
