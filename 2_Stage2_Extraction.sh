@@ -1,45 +1,48 @@
 #!/bin/bash
 # ==============================================================================
 # Module: 2_Stage2_Extraction.sh
-# Wi-BFI payload extraction and trigger subsequent stages
+# Watch WATCH_DIR and run Stage 2 then Stage 3 on each chunk that lands.
 # ==============================================================================
 source ./config.env
 
-echo "[*] Stage 2: Extraction Dispatcher Active. Watching for chunks..."
+SESSION_DIR="${SESSION_DIR:-./session_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$SESSION_DIR/stage1" "$SESSION_DIR/stage2" "$SESSION_DIR/stage3"
+
+LOG_PREFIX="$SESSION_DIR/stage2/observe"
+SOLVE_OUT="$SESSION_DIR/stage3/solve.jsonl"
+export SOLVE_OUT
+TIMING_LOG="$SESSION_DIR/timing.jsonl"
+PIPELINE_LOG="$SESSION_DIR/pipeline.log"
+export TIMING_LOG
+export SOLVE_REPORT="$SESSION_DIR/stage3/solve.txt"
+
+echo "[*] Stage 2/3 watcher on $WATCH_DIR -> $SESSION_DIR"
 
 # Both events are needed, one per delivery mechanism: tcpdump closes a rotated
 # chunk (close_write), while 0_replay_pcap.sh renames one in (moved_to).
 inotifywait -m -e close_write,moved_to --format "%w%f" "$WATCH_DIR" | while read -r NEW_PCAP
 do
     if [[ "$NEW_PCAP" != *.pcap ]]; then continue; fi
-    BASE=$(basename "$NEW_PCAP" .pcap)
-    
-    RAW_VMATRIX="${WATCH_DIR}/${BASE}_vmatrix.npy"
-    RAW_ANGLES="${WATCH_DIR}/${BASE}_angles.npy"
-    SANITIZED="${WATCH_DIR}/${BASE}_sanitized.npy"
-    AP_CHUNK_META="${WATCH_DIR}/${BASE}_ap_metadata.json"
+    CHUNK=$(basename "$NEW_PCAP")
+    ARRIVED=$(date +%s.%N)
 
-    python3 "$WIBFI_DIR/main.py" "$NEW_PCAP" "$WIFI_STANDARD" "$MIMO_MODE" "$FALLBACK_CONFIG" "$BANDWIDTH" "$MAX_PACKETS" "$RAW_VMATRIX" "$RAW_ANGLES" >> "$LOG_FILE" 2>&1
+    # Stage 1's output for this chunk, kept so a run can be re-read end to end.
+    cp "$NEW_PCAP" "$SESSION_DIR/stage1/$CHUNK"
 
-    # Same chunk, Beacon frames this time: folds each AP's SSID, transmit power
-    # and RSSI into the registry Stage 4 reads for AP distance and hotspot class.
-    python3 extract_ap_metadata.py "$NEW_PCAP" "$AP_CHUNK_META" >> "$LOG_FILE" 2>&1
-    if [ -f "$AP_CHUNK_META" ]; then
-        python3 ap_registry.py "$AP_CHUNK_META" "$AP_REGISTRY_PATH" "$WIFI_CHANNEL" >> "$LOG_FILE" 2>&1
-        rm -f "$AP_CHUNK_META"
-    fi
+    # Stage 2: frames -> appended observable log. Wi-BFI is invoked as a
+    # subprocess by observe.py, so the extractor stays a standalone tool.
+    python3 observe.py "$NEW_PCAP" "$LOG_PREFIX" "$WIBFI_DIR" "$TIMING_LOG" \
+        2>>"$PIPELINE_LOG" | tee -a "$PIPELINE_LOG"
 
-    if [ -f "$RAW_VMATRIX" ]; then
-        python3 2_1_Temporal_Sanitizer.py "$RAW_VMATRIX" "$TDT_MS" >> "$LOG_FILE" 2>&1
-        
-        if [ -f "$SANITIZED" ]; then
-            # STATE_FILE (Stage 3 window) and TRACK_STATE_FILE (Stage 4 tracks)
-            # must stay separate files: Stage 4 dropping a stale track would
-            # otherwise clobber Stage 3's window for that same bucket.
-            python3 3_Stage3_Localization.py "$SANITIZED" "$STAGE3_OUT" "$STATE_FILE"
-            python3 4_Stage4_Inference.py "$STAGE3_OUT" "$TRACK_STATE_FILE"
-            rm -f "$RAW_VMATRIX" "$RAW_ANGLES" "$SANITIZED"
-        fi
-    fi
+    # Stage 3: log -> bearings. Re-solved over the whole log each time, since
+    # the log is the only state and a later chunk changes earlier buckets.
+    python3 dispatch.py "$LOG_PREFIX" "${SITE_JSON:--}" \
+        2>>"$PIPELINE_LOG" | grep '^\[stage3\]' | tee -a "$PIPELINE_LOG"
+
+    DONE=$(date +%s.%N)
+    CHAIN=$(echo "$DONE $ARRIVED" | awk '{printf "%.0f", ($1-$2)*1000}')
+    echo "[chain ] $CHUNK  arrival to stage3 complete: ${CHAIN} ms" | tee -a "$PIPELINE_LOG"
+    echo "{\"stage\":\"chain\",\"chunk\":\"$CHUNK\",\"ms\":$CHAIN}" >> "$TIMING_LOG"
+
     rm -f "$NEW_PCAP"
 done

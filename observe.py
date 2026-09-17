@@ -34,6 +34,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -263,18 +264,32 @@ def bfi_records(pcap_path, wibfi_dir, scratch, feedback_types):
 
 def observe(pcap_path, log_prefix, wibfi_dir):
     """
-    Append one chunk's observations to the log. Returns per-kind counts.
+    Append one chunk's observations to the log.
+
+    Returns per-kind counts plus a timing mapping. The timings separate the
+    direct frame walk from the extractor subprocess, because only the second
+    scales with report count and only the first is paid on an empty chunk.
+
+    lag_s is the interval between the last frame in the chunk and the moment
+    this stage finished with it: how far behind the air the log runs on a live
+    capture, or the recording's age when a stored file is replayed.
     """
+    started = time.perf_counter()
     capture_reader = _import_capture_reader(wibfi_dir)
     jsonl_path, bin_path = log_prefix + ".jsonl", log_prefix + ".bin"
     counts = {"bfi": 0, "beacon": 0, "probe_response": 0}
+    timing = {}
 
     with tempfile.TemporaryDirectory() as scratch, \
             open(jsonl_path, "a") as log, open(bin_path, "ab") as blob:
         # Offsets recorded below are absolute within the file.
         blob.seek(0, os.SEEK_END)
 
+        mark = time.perf_counter()
         feedback_types, beacons = scan_chunk(pcap_path, capture_reader)
+        timing["scan_s"] = time.perf_counter() - mark
+
+        latest = max((b["t"] for b in beacons), default=None)
 
         log.write(json.dumps({
             "kind": "source",
@@ -283,6 +298,7 @@ def observe(pcap_path, log_prefix, wibfi_dir):
             "feedback_types": sorted(feedback_types),
         }) + "\n")
 
+        mark = time.perf_counter()
         for record, v_matrix in bfi_records(pcap_path, wibfi_dir, scratch,
                                             feedback_types):
             payload = np.ascontiguousarray(v_matrix).tobytes()
@@ -295,12 +311,17 @@ def observe(pcap_path, log_prefix, wibfi_dir):
             blob.write(payload)
             log.write(json.dumps(record) + "\n")
             counts["bfi"] += 1
+            if latest is None or record["t"] > latest:
+                latest = record["t"]
+        timing["extract_s"] = time.perf_counter() - mark
 
         for record in beacons:
             log.write(json.dumps(record) + "\n")
             counts[record["kind"]] += 1
 
-    return counts
+    timing["total_s"] = time.perf_counter() - started
+    timing["lag_s"] = (time.time() - latest) if latest is not None else None
+    return counts, timing
 
 
 def read_v_matrix(record, log_prefix):
@@ -323,11 +344,19 @@ def read_log(log_prefix):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("usage: observe.py <chunk.pcap> <log_prefix> [wibfi_dir]",
+        print("usage: observe.py <chunk.pcap> <log_prefix> [wibfi_dir] [timing.jsonl]",
               file=sys.stderr)
         raise SystemExit(2)
     wibfi = os.path.abspath(sys.argv[3] if len(sys.argv) > 3
                             else os.environ.get("WIBFI_DIR", "../Wi-BFI"))
-    result = observe(sys.argv[1], sys.argv[2], wibfi)
-    print(f"[*] {os.path.basename(sys.argv[1])}: "
-          + "  ".join(f"{k}={v}" for k, v in result.items()))
+    counts, timing = observe(sys.argv[1], sys.argv[2], wibfi)
+    lag = "" if timing["lag_s"] is None else f"  lag={timing['lag_s']:.2f}s"
+    print(f"[stage2] {os.path.basename(sys.argv[1])}: "
+          + "  ".join(f"{k}={v}" for k, v in counts.items())
+          + f"   scan={timing['scan_s'] * 1e3:.0f}ms"
+          + f" extract={timing['extract_s'] * 1e3:.0f}ms"
+          + f" total={timing['total_s'] * 1e3:.0f}ms{lag}")
+    if len(sys.argv) > 4:
+        with open(sys.argv[4], "a") as handle:
+            handle.write(json.dumps({"stage": 2, "chunk": os.path.basename(sys.argv[1]),
+                                     "counts": counts, "timing": timing}) + "\n")

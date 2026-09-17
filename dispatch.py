@@ -21,6 +21,7 @@ later calibrated run able to test it.
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -231,29 +232,74 @@ def solve_bucket(records, log_prefix, site, max_reports=None):
     return facts, results
 
 
-def solve(log_prefix, site_path=None, max_reports=None, out_path=None):
-    """Run Stage 3 over every bucket in the log and append the results."""
+def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
+          tag=None):
+    """
+    Run Stage 3 over every bucket in the log and append the results.
+
+    Returns (path, bucket count, timing). Timing separates reading the log from
+    solving it: the read grows with the whole session's history, the solve with
+    the bucket count and each estimator's grid.
+
+    Results are appended, not overwritten. A later chunk adds reports to buckets
+    already solved, so each pass is a fresh snapshot of every bucket rather than
+    an increment; pass and tag identify which pass a record belongs to, and
+    report() renders the last.
+
+    lag_s is measured against wall clock, so it reads as pipeline lag on a live
+    capture and as the recording's age on a replay.
+    """
+    started = time.perf_counter()
     site = load_site(site_path)
+
+    mark = time.perf_counter()
     buckets = {}
+    latest = None
     for record in observe.read_log(log_prefix):
         if record.get("kind") == "bfi":
             buckets.setdefault(record["bucket"], []).append(record)
+            if latest is None or record["t"] > latest:
+                latest = record["t"]
+    read_s = time.perf_counter() - mark
 
-    out_path = out_path or (log_prefix + ".solve.jsonl")
+    out_path = out_path or os.environ.get("SOLVE_OUT") or (log_prefix + ".solve.jsonl")
+    pass_index = 0
+    if os.path.exists(out_path):
+        with open(out_path) as handle:
+            for line in handle:
+                if line.strip():
+                    pass_index = max(pass_index,
+                                     json.loads(line).get("pass", 0) + 1)
     written = 0
+    per_estimator = {}
+    mark = time.perf_counter()
     with open(out_path, "a") as handle:
         for key in sorted(buckets, key=lambda k: -len(buckets[k])):
             facts, results = solve_bucket(buckets[key], log_prefix, site,
                                           max_reports)
-            handle.write(json.dumps({"kind": "solve", "facts": facts,
-                                     "results": results}) + "\n")
+            for result in results:
+                if result.get("ran"):
+                    per_estimator[result["estimator"]] = per_estimator.get(
+                        result["estimator"], 0) + 1
+            handle.write(json.dumps({"kind": "solve", "pass": pass_index,
+                                     "tag": tag, "at": time.time(),
+                                     "facts": facts, "results": results}) + "\n")
             written += 1
-    return out_path, written
+    solve_s = time.perf_counter() - mark
+
+    timing = {
+        "read_s": read_s,
+        "solve_s": solve_s,
+        "total_s": time.perf_counter() - started,
+        "lag_s": (time.time() - latest) if latest is not None else None,
+        "estimator_runs": per_estimator,
+    }
+    return out_path, written, timing
 
 
 def report(solve_path, stream=sys.stdout):
     """
-    Print the solve file as a table, readable without parsing JSON.
+    Print the last solve pass as a table, readable without parsing JSON.
 
     Estimators are shown side by side rather than reconciled: agreement means
     the data supports a bearing, spread means it does not, and a single
@@ -263,8 +309,13 @@ def report(solve_path, stream=sys.stdout):
     carry an unknown per-beamformer rotation, so what compares against a real
     room is the pattern across one beamformer's clients, not a single figure.
     """
-    for line in open(solve_path):
-        entry = json.loads(line)
+    entries = [json.loads(line) for line in open(solve_path) if line.strip()]
+    if not entries:
+        return
+    last = max(entry.get("pass", 0) for entry in entries)
+    for entry in entries:
+        if entry.get("pass", 0) != last:
+            continue
         facts, results = entry["facts"], entry["results"]
         coh = facts.get("coherence") or {}
         print(f"\n{facts['transmitter']}  ->  {facts['beamformer']}", file=stream)
@@ -301,11 +352,24 @@ def report(solve_path, stream=sys.stdout):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: dispatch.py <log_prefix> [site.json] [max_reports]",
-              file=sys.stderr)
+        print("usage: dispatch.py <log_prefix> [site.json] [max_reports]\n"
+              "  env: SOLVE_OUT, SOLVE_REPORT, TIMING_LOG", file=sys.stderr)
         raise SystemExit(2)
     site_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "-" else None
     cap = int(sys.argv[3]) if len(sys.argv) > 3 else None
-    path, count = solve(sys.argv[1], site_arg, cap)
-    print(f"[*] {count} buckets solved -> {path}")
-    report(path)
+    path, count, timing = solve(sys.argv[1], site_arg, cap)
+    lag = "" if timing["lag_s"] is None else f"  lag={timing['lag_s']:.2f}s"
+    print(f"[stage3] {count} buckets -> {path}"
+          f"   read={timing['read_s'] * 1e3:.0f}ms"
+          f" solve={timing['solve_s'] * 1e3:.0f}ms"
+          f" total={timing['total_s'] * 1e3:.0f}ms{lag}")
+    timing_path = os.environ.get("TIMING_LOG")
+    if timing_path:
+        with open(timing_path, "a") as handle:
+            handle.write(json.dumps({"stage": 3, "buckets": count,
+                                     "timing": timing}) + "\n")
+    if os.environ.get("SOLVE_REPORT"):
+        with open(os.environ["SOLVE_REPORT"], "w") as handle:
+            report(path, stream=handle)
+    else:
+        report(path)
