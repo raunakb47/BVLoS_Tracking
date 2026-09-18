@@ -30,9 +30,10 @@ echo "[*] Capture filter: ${CAPTURE_FILTER}"
 # -w chunk_%s.pcap  '%s' is the Unix epoch second, monotonic and unique, so a
 #     restart cannot collide with an earlier filename. '%S' (seconds within the
 #     minute) wraps every 60 s and does collide if Stage 2 falls a minute behind.
-# CAPTURE_FILTER  BPF filter (config.env) keeping Beacon, Probe Response and
-#     Action frames only, so a busy environment's data frames are dropped in the
-#     kernel rather than written to disk and discarded in Stage 2.
+# CAPTURE_FILTER  BPF filter (config.env) keeping the two Compressed
+#     Beamforming Action categories plus Beacon and Probe Response, so a busy
+#     environment's other traffic is dropped in the kernel rather than written
+#     to disk and discarded in Stage 2.
 #
 # -G with -W but without -C is not a circular buffer: tcpdump prints "Maximum
 # file limit reached" and exits once it has written -W files. At CHUNK_TIME=10
