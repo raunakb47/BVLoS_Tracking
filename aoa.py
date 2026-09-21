@@ -449,6 +449,31 @@ def joint_aod_delay(v_stack, stream_gain_db, positions_m, frequencies_hz,
 
 # ------------------------------------------------------------ capabilities
 
+# min_reports is 1 for every entry: no count gate is enforced yet.
+#
+# Provisional figures from one capture (4 buckets, 4x1/4x2/3x3 @ 40 MHz VHT,
+# 300 reports each), as median degrees of deviation from each estimator's own
+# all-reports answer. "leading" compares top bearing to top bearing, which is
+# what a consumer reading candidates[0] sees; "nearest" compares against the
+# closest of the reference's top three, so the gap between them is ranking
+# instability rather than a moving bearing.
+#
+#                n=1    n=2    n=5   n=10   n=20   n=50
+#   music  lead   9.4   14.5    6.4    2.4    1.5    1.0
+#          near   6.2    4.4    2.8    1.3    1.2    1.0
+#   spice  lead   3.4    3.2    1.4    0.9    0.5    0.4
+#          near   2.6    2.5    1.1    0.9    0.5    0.4
+#   esprit lead   6.4    8.4    4.7    2.4    1.9    1.2
+#          near   6.4    7.3    4.7    2.4    1.9    1.2
+#
+# Read against "leading", the curves knee at roughly spice 1-2, music 10,
+# esprit 10. Those are candidate values, not measurements of a framework
+# constant: the sounding rate, array and multipath all move them, and one
+# capture cannot separate what is the estimator from what is the room. A
+# second capture decides whether they hold.
+#
+# joint_aod_delay is unmeasured; at ~826 ms per solve it dominates the bench.
+
 ESTIMATORS = {
     "music": {
         "function": music,
