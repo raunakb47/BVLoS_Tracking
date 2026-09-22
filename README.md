@@ -69,7 +69,7 @@ rotation period in seconds. Standard, MIMO configuration and channel width are
 decoded per packet, so they are not configured here.
 
 
-### 2. Launch the Pipeline (Choose Live or Simulation)
+### 3. Launch the Pipeline (Choose Live or Simulation)
 **For Live Physical Capture:**
 Open a dedicated terminal and start the capture daemon to begin writing temporal chunks to storage.
 ```bash
@@ -84,7 +84,7 @@ cd BVLoS_Live_Tracker
 ./0_replay_pcap.sh  path/to/capture.pcap
 ```
 
-### 3. Initiate the Tracking Daemon
+### 4. Initiate the Tracking Daemon
 Open a second terminal window and launch the watcher. On each finalized chunk it
 runs Stage 2, invoking the `Wi-BFI` extractor as a subprocess and appending the
 observables, then Stage 3 over the log. Both stages time themselves. Outputs land
