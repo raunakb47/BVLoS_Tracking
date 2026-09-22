@@ -44,7 +44,8 @@ echo "[*] Initiating real-time simulation pipeline..."
 for FILE in $TMP_DIR/chunk*.pcap; do
     
     # 1. Move the chunk into the live directory. 
-    #    This atomic filesystem action triggers the `inotifywait` daemon in 2_watchdog.sh.
+    #    The rename is atomic, so it fires inotifywait's moved_to in
+    #    2_Stage2_Extraction.sh rather than a partial-file close_write.
     mv "$FILE" "$WATCH_DIR/"
     echo "[+] Pipeline Ingest: $(basename $FILE)"
     

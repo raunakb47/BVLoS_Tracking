@@ -28,31 +28,39 @@ Each client-AP link is tracked in its own bucket, keyed `{client_mac}_{ap_mac}_{
 │
 └── BVLoS_Live_Tracker/              # Tracking Architecture
     ├── 1_Stage1_Capture.sh              monitor-mode capture to rotating pcap chunks
-    ├──    2_Stage2_Extraction.sh        per-chunk dispatcher (inotify)
-    ├── 2_1_Temporal_Sanitizer.py        dropout-threshold segmentation and uniform resampling
-    ├──    3_Stage3_Localization.py      estimator routing
-    ├──   3_1_Spatial_Algorithms.py      SSE estimators and model-order gating
-    ├──   3_2_Kinematic_Tracker.py       KPVT: VSS-LMS background, OS-CFAR occupancy
-    ├──  4_Stage4_Inference.py           ray-circle geometry, track state, JSON telemetry
-    ├──  state_store.py                  cross-chunk per-bucket state
-    ├── tx_power_estimator.py            transmit-power estimates and log-distance ranging
-    ├── extract_ap_metadata.py           AP SSID, transmit power and beacon RSSI from Beacons
-    ├──   ap_registry.py                 persistent AP registry and derived AP range
-    ├──   hotspot_classifier.py          mobile-hotspot classification of the beamformer
-    ├──   config.env                     interface, channel, thresholds, state paths
-    ├──  0_replay_pcap.sh                offline replay of an existing capture
+    ├── 2_Stage2_Extraction.sh           per-chunk watcher, runs Stage 2 then Stage 3
+    ├── observe.py                       Stage 2: frames to an appended observable log
+    ├── dispatch.py                      Stage 3: estimator selection, solve, report
+    ├── aoa.py                           AoD estimators and array diagnostics
+    ├── bench_aoa.py                     synthetic ground-truth bench for aoa.py
+    ├── bench_precision.py               estimator precision on captured data
+    ├── config.env                       capture interface, chunk period, filter
+    ├── 0_replay_pcap.sh                 offline replay of an existing capture
+    │
+    ├── superseded                       function exists in the pipeline above
+    │   ├── 3_Stage3_Localization.py     estimator routing            -> dispatch.py
+    │   ├── 3_1_Spatial_Algorithms.py    SSE estimators               -> aoa.py
+    │   ├── extract_ap_metadata.py       AP metadata from Beacons     -> observe.py
+    │   └── hotspot_classifier.py        mobile-hotspot classification, no consumer
+    │
+    └── retained, not yet reimplemented  no destination module exists yet
+        ├── state_store.py               cross-chunk per-bucket state and windowing
+        ├── tx_power_estimator.py        log-distance ranging formulas
+        ├── ap_registry.py               AP range leg, derived from beacon records
+        ├── 4_Stage4_Inference.py        ray-circle geometry, track state
+        └── 3_2_Kinematic_Tracker.py     VSS-LMS motion, OS-CFAR occupancy
 
 ```
 
 ## ⚙️ Prerequisites
 Ensure the following system packages and Python libraries are installed before execution:
-* **System Utilities:** `tcpdump`, `wireshark-cli` (for `tshark`), `inotify-tools`
-* **Python Environment:** `numpy`, `pyshark`, `scipy`, `scikit-learn`
+* **System Utilities:** `tcpdump`, `iw`, `inotify-tools`, and `wireshark-cli` for `editcap` (offline replay only)
+* **Python Environment:** `numpy`
 * **Hardware:** A network interface card capable of Monitor Mode (e.g., Alfa AWUS036ACS). Recommended dual-antenna Network Interface Card capable of Monitor Mode (e.g., Alfa AWUS036AXM, AWUS036AXML)
 
 ```bash
-sudo apt install tcpdump tshark inotify-tools iw
-pip install numpy scipy scikit-learn pyshark
+sudo apt install tcpdump wireshark-cli inotify-tools iw
+pip install numpy
 ```
 
 ## ▶️ Quick Start Guide
@@ -62,12 +70,13 @@ Put the interface in monitor mode and lock it to the target channel. The capture
 script checks this and prints what it finds; if the width is wrong, BFI payloads arrive
 truncated.
 
-Define capture interface, operating channel, and algorithm thresholds in the environment configuration file.
+### 2. Edit `config.env`
 ```bash
 nano BVLoS_Live_Tracker/config.env
 ```
-### 2. Edit `config.env`.** 
-At minimum set `CAPTURE_INTERFACE`, `WIFI_CHANNEL`, `WIFI_STANDARD` and `BANDWIDTH` to match. Then set `TDT_MS` above the interval at which the AP actually sounds its clients — roughly 500 for 802.11ax and 2000 for 802.11ac on the reference traces. Too low and every packet is segmented on its own and nothing comes out; the sanitizer says so on stderr if that happens.
+Set `CAPTURE_INTERFACE` to the monitor-mode interface and `CHUNK_TIME` to the
+rotation period in seconds. Standard, MIMO configuration and channel width are
+decoded per packet, so they are not configured here.
 
 
 ### 2. Launch the Pipeline (Choose Live or Simulation)

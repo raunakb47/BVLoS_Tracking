@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Replay and live-capture working directories
+tmp_chunks/
+live_chunks/
+session_*/
