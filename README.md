@@ -5,15 +5,14 @@ Passive, unsupervised localization and occupancy sensing from IEEE 802.11ac/ax. 
 V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a sibling directory (`WIBFI_DIR` in `config.env`).
 
 ## 🚀 Core Features
-* **Ego-Centric Geometry:** Monitor card at the origin, AP on the positive Y-axis by convention. 
-* **Modified Wi-BFI Integration:** Customized to natively support low-aperture 2x1 and 2x2 MIMO configurations upto 4x4, extracting topology (wlan.ta and wlan.ra) and RSSI data directly from PCAP headers. Automatically reads matrix dimensions from PCAP headers and groups targets into unique `MAC_Config` buckets to prevent dimension-mismatch crashes when devices change MIMO config.
-*  **Triangulation.** Client-AP bearing from BFI, client-monitor range from the client's own frame RSSI, AP-monitor range from Beacon RSSI and the AP's advertised transmit power.
-* **Bistatic Ray-Circle Intersection:** Maps client locations by mathematically intersecting the AP's Angle of Departure (AoD) with a dynamically calculated Free Space Path Loss (FSPL) distance radius from the Monitor Card.
-* **Algorithm Dispatcher & Registry:** Evaluates incoming tensor metadata (MIMO config, packet density, kinematic energy) and dynamically routes data to the most mathematically viable algorithm (CA-ESPRIT, SpotFi, IAA-APES, or Residual 2D-MUSIC).  SSE resolves bearing and favours fixed APs; KPVT resolves motion and carries the mobile-hotspot case. A low-confidence bearing is withheld while KPVT's occupancy read still stands. CA-ESPRIT, SpotFi, IAA-APES or Residual 2D-MUSIC, selected per bucket on array size, packet density and kinematic energy.
-* **Kinematic Phase Variance Tracker (KPVT):** Extracts motion profiles via VSS-LMS background subtraction and PCA to determine client occupancy states. Per-bucket VSS-LMS, scale-normalized against the bucket's own residual-power floor, replacing a static per-chunk mean.
-* **Cross-chunk continuity.** A sliding estimation window decoupled from the capture rotation cadence, plus radar-style confirmed/coasting/dropped tracks that hold a client in place through quiet intervals instead of dropping it on the first one.
+* **Ego-centric geometry.** Monitor card at the origin. A bearing is relative to the beamformer's array; absent a surveyed `site.json` a nominal half-wavelength uniform linear array is assumed and every result names which was used.
+* **Per-packet decode.** Standard, Nc, Nr, channel width, codebook and subcarrier grouping are read from each frame's MIMO Control field, so one capture covers 2x1 through 4x4 and both Wi-Fi 5 and 6 without configuration. Reports are grouped into buckets keyed `{transmitter}_{beamformer}_{Nr}x{Nc}@{bw}`, which keeps a stack rectangular when a device changes configuration mid-capture.
+* **Append-only log as the only state.** Stage 2 writes observables once; a stage needing history reads further back rather than carrying its own state across chunk invocations.
+* **Capability-gated dispatch.** Each estimator declares what it requires — uniform linear geometry, a minimum report count, a frequency axis — and Stage 3 compares that against facts decoded in Stage 2. An estimator is applicable or not, and both outcomes are recorded with the reason. Adding one is a single registry entry.
+* **Estimators reported side by side.** MUSIC, ESPRIT, SPICE and a joint AoD/relative-delay method are run, never reconciled: agreement means the data supports a bearing, spread means it does not, and a single merged number would hide which.
+* **Two benches.** `bench_aoa.py` checks recovery of known angles through the standard's own compression; `bench_precision.py` measures how far each estimator moves when asked twice from different real data.
 
-Each client-AP link is tracked in its own bucket, keyed `{client_mac}_{ap_mac}_{mimo}`.
+**Not built yet.** No ranging leg: bearings are angular only, with no distance from RSSI. No Stage 4, so nothing renders a map. Stage 1 has never run against hardware.
 
 
 ## 📁 Workflow Structure
@@ -21,7 +20,8 @@ Each client-AP link is tracked in its own bucket, keyed `{client_mac}_{ap_mac}_{
 /workspace/
 │
 ├── Wi-BFI/                          # Submodule: Modified Extraction Engine
-│   ├── main.py                      # Dual-MAC PCAP parser (wlan.ta + wlan.ra + RSSI)
+│   ├── capture_reader.py            # pcap/pcapng reader, radiotap and frame selection
+│   ├── main.py                      # per-packet MIMO Control decode, V reconstruction
 │   ├── vmatrices.py                 # 4x4 to 2x1 Givens Rotation reconstructor
 │   ├── bfi_angles.py                # BFI phase/magnitude dequantizer
 │   └── utils.py
@@ -37,18 +37,8 @@ Each client-AP link is tracked in its own bucket, keyed `{client_mac}_{ap_mac}_{
     ├── config.env                       capture interface, chunk period, filter
     ├── 0_replay_pcap.sh                 offline replay of an existing capture
     │
-    ├── superseded                       function exists in the pipeline above
-    │   ├── 3_Stage3_Localization.py     estimator routing            -> dispatch.py
-    │   ├── 3_1_Spatial_Algorithms.py    SSE estimators               -> aoa.py
-    │   ├── extract_ap_metadata.py       AP metadata from Beacons     -> observe.py
-    │   └── hotspot_classifier.py        mobile-hotspot classification, no consumer
-    │
-    └── retained, not yet reimplemented  no destination module exists yet
-        ├── state_store.py               cross-chunk per-bucket state and windowing
-        ├── tx_power_estimator.py        log-distance ranging formulas
-        ├── ap_registry.py               AP range leg, derived from beacon records
-        ├── 4_Stage4_Inference.py        ray-circle geometry, track state
-        └── 3_2_Kinematic_Tracker.py     VSS-LMS motion, OS-CFAR occupancy
+    └── 4_Stage4_Inference.py            superseded, kept for reference while
+                                         Stage 4 is rewritten; does not import
 
 ```
 
@@ -95,7 +85,12 @@ cd BVLoS_Live_Tracker
 ```
 
 ### 3. Initiate the Tracking Daemon
-Open a second terminal window and launch the extraction watchdog. This daemon will automatically trigger the `Wi-BFI` payload extractor, sanitize the tensors, route them through the Stage 3 spatial algorithms, and streams Live JSON telemetry to the dashboard the moment a new PCAP chunk is finalized.
+Open a second terminal window and launch the watcher. On each finalized chunk it
+runs Stage 2, invoking the `Wi-BFI` extractor as a subprocess and appending the
+observables, then Stage 3 over the log. Both stages time themselves. Outputs land
+under a per-run session directory: `stage1/` the chunks, `stage2/observe.jsonl`
+and its binary sidecar, `stage3/solve.jsonl` and `solve.txt`, plus `timing.jsonl`
+and `pipeline.log`.
 ```bash
 cd BVLoS_Live_Tracker
 ./2_Stage2_Extraction.sh
