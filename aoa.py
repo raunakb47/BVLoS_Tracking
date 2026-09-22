@@ -449,32 +449,17 @@ def joint_aod_delay(v_stack, stream_gain_db, positions_m, frequencies_hz,
 
 # ------------------------------------------------------------ capabilities
 
-# min_reports comes from the convergence measured on two captures (4 and 6
-# buckets, 4x1/4x2/3x3 @ 40 MHz VHT, no client shared between them), as median
-# degrees of deviation from each estimator's own all-reports answer:
+# min_reports is the count an estimator structurally needs. A single report is
+# not a single snapshot: it carries V on every subcarrier and bff_covariance
+# averages over them, so the covariance is full rank from one packet and every
+# entry declares 1. Nothing here is gated on rank.
 #
-#                  n=1       n=2       n=5      n=10      n=20      n=50
-#   music  lead  9.4/9.5  14.5/5.8   6.4/3.5   2.4/2.7   1.5/1.3   1.0/1.0
-#          near  6.2/4.1   4.4/3.8   2.8/2.1   1.3/1.4   1.2/0.8   1.0/0.6
-#   spice  lead  3.4/3.0   3.2/2.8   1.4/0.9   0.9/0.8   0.5/0.5   0.4/0.3
-#          near  2.6/2.1   2.5/2.0   1.1/0.9   0.9/0.6   0.5/0.5   0.3/0.3
-#   esprit lead  6.4/6.4   8.4/4.2   4.7/3.4   2.4/2.5   1.9/1.5   1.2/0.9
-#          near  6.4/6.4   7.3/4.2   4.7/3.4   2.4/2.5   1.9/1.5   1.2/0.9
+# The count a deployment gates on for precision is MIN_REPORTS_<NAME> in
+# config.env, which states its basis; dispatch.report_gates() reads it and
+# refuses a value below the one declared here.
 #
-# "lead" compares top bearing to top bearing, which is what a consumer reading
-# candidates[0] sees; "near" compares against the closest of the reference's
-# top three. The gap between them is ranking instability rather than a moving
-# bearing, and it is why the gate is read off "lead".
-#
-# A single report is not a single snapshot: it carries V on every subcarrier
-# and bff_covariance averages over them, so the covariance is full rank from
-# one packet. Nothing here is gated on rank.
-#
-# The values still describe this hardware class, not the standard. Two
-# captures agreeing does not make them constants.
-#
-# joint_aod_delay is unmeasured and stays at 1; at ~826 ms per solve it
-# dominates the bench.
+# joint_aod_delay has no precision curve; at ~826 ms per solve it dominates
+# bench_precision.py.
 
 ESTIMATORS = {
     "music": {
@@ -482,7 +467,7 @@ ESTIMATORS = {
         "input": "covariance",
         "needs_uniform_linear": False,
         "needs_geometry": True,
-        "min_reports": 10,
+        "min_reports": 1,
         "handles_coherent": False,          # only with smoothing, which needs a ULA
         "uses_frequency_dimension": False,
         "reference": "Schmidt 1986; Itahara et al., IEEE Access 2022 (BFI form)",
@@ -492,7 +477,7 @@ ESTIMATORS = {
         "input": "covariance",
         "needs_uniform_linear": True,
         "needs_geometry": True,
-        "min_reports": 10,
+        "min_reports": 1,
         "handles_coherent": False,
         "uses_frequency_dimension": False,
         "reference": "Roy & Kailath, IEEE Trans. ASSP 37(7):984-995, 1989",

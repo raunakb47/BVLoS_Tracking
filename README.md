@@ -34,7 +34,8 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
     ├── aoa.py                           AoD estimators and array diagnostics
     ├── bench_aoa.py                     synthetic ground-truth bench for aoa.py
     ├── bench_precision.py               estimator precision on captured data
-    ├── config.env                       capture interface, chunk period, filter
+    ├── config.env                       capture interface, chunk period, filter,
+    │                                    per-estimator report-count gates
     ├── 0_replay_pcap.sh                 offline replay of an existing capture
     │
     └── 4_Stage4_Inference.py            superseded, kept for reference while
@@ -66,7 +67,9 @@ nano BVLoS_Live_Tracker/config.env
 ```
 Set `CAPTURE_INTERFACE` to the monitor-mode interface and `CHUNK_TIME` to the
 rotation period in seconds. Standard, MIMO configuration and channel width are
-decoded per packet, so they are not configured here.
+decoded per packet, so they are not configured here. `MIN_REPORTS_<ESTIMATOR>`
+sets how many reports a bucket needs before that estimator runs; the file states
+the basis of the shipped values.
 
 
 ### 3. Launch the Pipeline (Choose Live or Simulation)

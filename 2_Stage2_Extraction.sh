@@ -18,6 +18,10 @@ export SOLVE_REPORT="$SESSION_DIR/stage3/solve.txt"
 
 echo "[*] Stage 2/3 watcher on $WATCH_DIR -> $SESSION_DIR"
 
+# A malformed MIN_REPORTS_* stops the watcher here rather than failing Stage 3
+# on every chunk with the error only in pipeline.log.
+python3 -c 'import dispatch; print("[*] Report gates:", dispatch.report_gates())' || exit 1
+
 # Both events are needed, one per delivery mechanism: tcpdump closes a rotated
 # chunk (close_write), while 0_replay_pcap.sh renames one in (moved_to).
 inotifywait -m -e close_write,moved_to --format "%w%f" "$WATCH_DIR" | while read -r NEW_PCAP

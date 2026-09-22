@@ -9,7 +9,8 @@ aoa.ESTIMATORS declares what it requires -- uniform linear geometry, a minimum
 report count, tolerance of coherent sources -- and those are compared against
 facts decoded in Stage 2. An estimator is either applicable or not, and both
 outcomes are recorded with the reason, so adding one is a single entry in
-aoa.ESTIMATORS with no change here.
+aoa.ESTIMATORS with no change here. The report count gated on is set per
+deployment in config.env; see report_gates().
 
 Geometry comes from site.json when present. Element positions are a property of
 the hardware and no signal processing recovers them, so absent site.json a
@@ -34,6 +35,39 @@ import observe
 SUBCARRIER_SPACING_HZ = {"AC": 312500.0, "AX": 78125.0}
 
 _C_LIGHT = 299792458.0
+
+_GATE_PREFIX = "MIN_REPORTS_"
+
+
+def report_gates(environ=None):
+    """
+    Minimum report count per estimator, from MIN_REPORTS_<NAME> in config.env.
+
+    How many reports a bearing needs before it stops moving is a property of
+    the hardware and the room, so it is configured, not coded. Unset, the count
+    the estimator declares in aoa.ESTIMATORS applies. A variable naming no
+    estimator, not an integer, or below the declared count raises: each would
+    otherwise leave a gate silently unapplied.
+    """
+    environ = os.environ if environ is None else environ
+    gates = {name: spec["min_reports"] for name, spec in aoa.ESTIMATORS.items()}
+    for key, value in environ.items():
+        if not key.startswith(_GATE_PREFIX):
+            continue
+        name = key[len(_GATE_PREFIX):].lower()
+        if name not in gates:
+            raise ValueError(f"{key} names no estimator; expected one of "
+                             + ", ".join(_GATE_PREFIX + n.upper() for n in gates))
+        try:
+            count = int(value)
+        except ValueError:
+            raise ValueError(f"{key}={value!r} is not an integer") from None
+        declared = aoa.ESTIMATORS[name]["min_reports"]
+        if count < declared:
+            raise ValueError(f"{key}={count} is below the {declared} "
+                             f"report(s) {name} requires")
+        gates[name] = count
+    return gates
 
 
 def load_site(path):
@@ -143,17 +177,17 @@ def _is_grouped(standard, ng):
     return ng != NATIVE_NG.get(standard)
 
 
-def applicable(name, spec, facts):
+def applicable(name, spec, facts, min_reports):
     """
     Whether an estimator can run on this bucket, and why not when it cannot.
 
-    Every test compares a declared requirement against a decoded fact; none
-    consults a measurement's value.
+    Every test compares a declared or configured requirement against a decoded
+    fact; none consults a measurement's value.
     """
     if spec["needs_uniform_linear"] and not facts["uniform_linear"]:
         return False, "geometry is not a uniform linear array"
-    if facts["n_reports"] < spec["min_reports"]:
-        return False, f"needs {spec['min_reports']} reports, bucket has {facts['n_reports']}"
+    if facts["n_reports"] < min_reports:
+        return False, f"needs {min_reports} reports, bucket has {facts['n_reports']}"
     if spec["needs_geometry"] and facts["n_antennas"] < 2:
         return False, f"needs at least 2 elements, beamformer has {facts['n_antennas']}"
     if spec["uses_frequency_dimension"]:
@@ -170,11 +204,12 @@ def applicable(name, spec, facts):
     return True, None
 
 
-def solve_bucket(records, log_prefix, site, max_reports=None):
+def solve_bucket(records, log_prefix, site, max_reports=None, gates=None):
     """
     Run every applicable estimator over one bucket, returning their results and
-    the facts selection used.
+    the facts selection used. gates defaults to report_gates().
     """
+    gates = report_gates() if gates is None else gates
     records = sorted(records, key=lambda r: r["t"])
     if max_reports:
         records = records[-max_reports:]
@@ -224,7 +259,7 @@ def solve_bucket(records, log_prefix, site, max_reports=None):
 
     results = []
     for name, spec in aoa.ESTIMATORS.items():
-        ok, reason = applicable(name, spec, facts)
+        ok, reason = applicable(name, spec, facts, gates[name])
         if not ok:
             results.append({"estimator": name, "ran": False, "reason": reason})
             continue
@@ -276,6 +311,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     capture and as the recording's age on a replay.
     """
     started = time.perf_counter()
+    gates = report_gates()
     site = load_site(site_path)
 
     mark = time.perf_counter()
@@ -302,7 +338,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     with open(out_path, "a") as handle:
         for key in sorted(buckets, key=lambda k: -len(buckets[k])):
             facts, results = solve_bucket(buckets[key], log_prefix, site,
-                                          max_reports)
+                                          max_reports, gates)
             for result in results:
                 if result.get("ran"):
                     per_estimator[result["estimator"]] = per_estimator.get(
@@ -379,7 +415,8 @@ def report(solve_path, stream=sys.stdout):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: dispatch.py <log_prefix> [site.json] [max_reports]\n"
-              "  env: SOLVE_OUT, SOLVE_REPORT, TIMING_LOG", file=sys.stderr)
+              "  env: SOLVE_OUT, SOLVE_REPORT, TIMING_LOG, MIN_REPORTS_<ESTIMATOR>",
+              file=sys.stderr)
         raise SystemExit(2)
     site_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "-" else None
     cap = int(sys.argv[3]) if len(sys.argv) > 3 else None
