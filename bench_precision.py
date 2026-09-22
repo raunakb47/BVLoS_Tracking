@@ -99,7 +99,7 @@ def bucket_precision(records, log_prefix, estimators, seed=0):
     wavelength = _C_LIGHT / (centre_mhz * 1e6)
     positions = aoa.uniform_linear(head["nr"], wavelength / 2.0)
     frequencies = dispatch.subcarrier_frequencies(
-        head["standard"], head["bw"], centre_mhz, head["nsubc"])
+        head["standard"], head["bw"], centre_mhz, head["nsubc"], head["ng"])
 
     v_stack = np.stack([observe.read_v_matrix(r, log_prefix) for r in records])
     gains_db = np.array([r["stream_snr"] for r in records], dtype=float)

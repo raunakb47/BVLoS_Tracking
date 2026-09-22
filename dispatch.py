@@ -69,20 +69,24 @@ def geometry_for(beamformer, n_antennas, wavelength_m, site):
             0.0)
 
 
-def subcarrier_frequencies(standard, bandwidth_mhz, centre_mhz, n_expected):
+def subcarrier_frequencies(standard, bandwidth_mhz, centre_mhz, n_expected, ng=None):
     """
     Absolute frequency of each reported subcarrier, or None if the set cannot
     be reconstructed.
 
     Uses Wi-BFI's subcarrier index table so the two cannot disagree about which
-    subcarriers a report covers; a count mismatch means they have.
+    subcarriers a report covers; a count mismatch means they have. Positions
+    exist only at the native grouping, so any other ng returns None rather than
+    a set the standard does not define.
     """
     if centre_mhz is None:
         return None
     sys.path.insert(0, os.environ.get("WIBFI_DIR", "../Wi-BFI"))
     try:
-        from main import subcarrier_indices
+        from main import NATIVE_NG, subcarrier_indices
     except ImportError:
+        return None
+    if ng is not None and ng != NATIVE_NG.get(standard):
         return None
     indices = subcarrier_indices(standard, int(bandwidth_mhz))
     if indices is None or len(indices) != n_expected:
@@ -124,6 +128,21 @@ def coherence(covariances):
             "principal": float(np.median(principal_scores))}
 
 
+def _is_grouped(standard, ng):
+    """
+    Whether a report covers fewer subcarriers than the standard's full set.
+
+    True when Ng is unknown: an undecoded grouping is not evidence of the
+    native one, and the frequency-dependent estimators must not run on it.
+    """
+    sys.path.insert(0, os.environ.get("WIBFI_DIR", "../Wi-BFI"))
+    try:
+        from main import NATIVE_NG
+    except ImportError:
+        return True
+    return ng != NATIVE_NG.get(standard)
+
+
 def applicable(name, spec, facts):
     """
     Whether an estimator can run on this bucket, and why not when it cannot.
@@ -137,8 +156,14 @@ def applicable(name, spec, facts):
         return False, f"needs {spec['min_reports']} reports, bucket has {facts['n_reports']}"
     if spec["needs_geometry"] and facts["n_antennas"] < 2:
         return False, f"needs at least 2 elements, beamformer has {facts['n_antennas']}"
-    if spec["uses_frequency_dimension"] and facts["frequencies_hz"] is None:
-        return False, "subcarrier frequencies could not be reconstructed"
+    if spec["uses_frequency_dimension"]:
+        # Stated before the generic check below so a grouped bucket names
+        # grouping rather than reporting an unreconstructable frequency set.
+        if facts["grouped"]:
+            return False, f"grouped feedback (Ng={facts['grouping_ng']}) defines no " \
+                          "subcarrier positions"
+        if facts["frequencies_hz"] is None:
+            return False, "subcarrier frequencies could not be reconstructed"
     # MUSIC and ESPRIT need at least one noise eigenvector.
     if name in ("music", "esprit") and facts["n_antennas"] < 2:
         return False, "no noise subspace on a single element"
@@ -166,7 +191,7 @@ def solve_bucket(records, log_prefix, site, max_reports=None):
         wavelength if wavelength else _C_LIGHT / 5.5e9, site)
 
     frequencies = subcarrier_frequencies(head["standard"], head["bw"],
-                                         centre_mhz, head["nsubc"])
+                                         centre_mhz, head["nsubc"], head["ng"])
 
     per_report = [aoa.bff_covariance(v_stack[i:i + 1], gains_db[i:i + 1])
                   for i in range(len(records))]
@@ -184,6 +209,7 @@ def solve_bucket(records, log_prefix, site, max_reports=None):
         "bandwidth_mhz": head["bw"],
         "centre_freq_mhz": centre_mhz,
         "grouping_ng": head["ng"],
+        "grouped": _is_grouped(head["standard"], head["ng"]),
         "codebook": head["codebook"],
         "n_reports": len(records),
         "time_span_s": records[-1]["t"] - records[0]["t"],
