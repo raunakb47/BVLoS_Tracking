@@ -266,7 +266,8 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None):
         try:
             if spec["input"] == "covariance":
                 out = spec["function"](covariance, positions, wavelength,
-                                       n_snapshots=head["nsubc"])
+                                       n_snapshots=head["nsubc"],
+                                       **spec.get("params", {}))
             else:
                 out = spec["function"](v_stack, gains_db, positions, frequencies)
         except Exception as exc:                      # noqa: BLE001

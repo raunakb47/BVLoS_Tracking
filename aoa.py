@@ -311,60 +311,105 @@ def esprit(covariance, positions_m, wavelength_m, n_sources=None,
                    {"candidates_rad": [(float(a), 1.0) for a in np.sort(angles)]})
 
 
-def spice(covariance, positions_m, wavelength_m, grid_rad=None,
-          iterations=15, n_sources=None, n_snapshots=1):
-    """
-    SPICE, sparse iterative covariance-based estimation.
-    Stoica, Babu & Li, IEEE Trans. Signal Processing 59(2):629-638, 2011.
-
-    Fits sum_g p_g a_g a_g^H + noise by a weighted covariance-matching
-    criterion with a closed-form multiplicative update: no step size,
-    regularisation weight or stopping threshold.
-
-    Used in place of IAA-APES because it fits a covariance. IAA's amplitude
-    step reads data snapshots, whose phase the standard's gauge sets rather
-    than the channel.
-    """
+def _grid_dictionary(covariance, positions_m, wavelength_m, grid_rad):
+    """Covariance, (n, G) steering dictionary and grid shared by the power estimators."""
     if grid_rad is None:
         grid_rad = np.linspace(-np.pi / 2, np.pi / 2, 721)
-    c = np.asarray(covariance)
-    n = c.shape[0]
-    # steering_matrix returns (G, n); the plain transpose gives the (n, G)
-    # dictionary. Conjugating as well negates the phase and mirrors every
-    # estimate.
-    a = steering_matrix(positions_m, wavelength_m, grid_rad).T         # (n, G)
-    a /= np.linalg.norm(a, axis=0, keepdims=True)
-    n_grid = a.shape[1]
+    # steering_matrix returns (G, n); the plain transpose gives the dictionary.
+    # Conjugating as well negates the phase and mirrors every estimate.
+    a = steering_matrix(positions_m, wavelength_m, grid_rad).T
+    return np.asarray(covariance), a, grid_rad
 
-    power = np.abs(np.einsum('ig,ij,jg->g', a.conj(), c, a)).real / n
-    power = np.maximum(power, 1e-12)
-    noise = max(float(np.real(np.trace(c)) / n) * 1e-3, 1e-12)
 
-    weights = np.concatenate([np.ones(n_grid), np.full(n, 1.0)])
-    dictionary = np.concatenate([a, np.eye(n)], axis=1)                # (n, G+n)
-    gamma = np.concatenate([power, np.full(n, noise)])
-
-    for _ in range(iterations):
-        r = (dictionary * gamma) @ dictionary.conj().T
-        r_inv = np.linalg.pinv(r + 1e-12 * np.eye(n))
-        # Closed-form update: each component scales by the ratio of the data
-        # it explains to the model's prediction for it.
-        numerator = np.einsum('ig,ij,jk,kl,lg->g', dictionary.conj(), r_inv,
-                              c, r_inv, dictionary).real
-        denominator = np.einsum('ig,ij,jg->g', dictionary.conj(), r_inv,
-                                dictionary).real
-        numerator = np.maximum(numerator, 0.0)
-        denominator = np.maximum(denominator, 1e-300)
-        scale = np.sqrt(numerator / denominator) / np.sqrt(weights)
-        gamma = gamma * scale
-        gamma = np.maximum(gamma, 1e-300)
-
+def _source_count(c, n_sources, n_snapshots):
+    """Eigenvalues and MDL count, reported alongside; the power spectra do not use them."""
     values = np.linalg.eigvalsh(c)[::-1]
     if n_sources is None:
         n_sources = max(1, mdl_source_count(values, n_snapshots,
-                                            max_sources=n - 1))
-    return _result("spice", grid_rad, gamma[:n_grid], values, int(n_sources),
-                   {"noise_estimate": gamma[n_grid:].copy()})
+                                            max_sources=len(values) - 1))
+    return values, int(n_sources)
+
+
+def spice(covariance, positions_m, wavelength_m, tolerance, max_iterations,
+          grid_rad=None, n_sources=None, n_snapshots=1):
+    """
+    SPICE with a separate noise power per element.
+    Stoica, Babu & Li, IEEE TSP 59(2):629-638, 2011, eqs. (11), (21), (33)-(35).
+
+    Criterion (13): powers on the grid and on the n canonical vectors are
+    updated multiplicatively with fixed weights w_k = a_k^H Rhat^-1 a_k / n.
+    The problem is convex and limit points are global solutions, so iteration
+    stops on convergence: relative power change sum|dp| / sum p below
+    tolerance, or max_iterations. Needs Rhat invertible, which bff_covariance
+    gives from one report.
+    """
+    c, a, grid_rad = _grid_dictionary(covariance, positions_m, wavelength_m, grid_rad)
+    n, n_grid = a.shape
+    b = np.concatenate([a, np.eye(n)], axis=1)                          # (11)
+    norm2 = np.sum(np.abs(b) ** 2, axis=0)
+    p = np.einsum('ig,ij,jg->g', b.conj(), c, b).real / norm2 ** 2      # (35)
+    root_w = np.sqrt(np.einsum('ig,ij,jg->g', b.conj(), np.linalg.inv(c), b).real / n)   # (21)
+    w_vals, w_vecs = np.linalg.eigh(c)
+    half = (w_vecs * np.sqrt(np.maximum(w_vals, 0.0))) @ w_vecs.conj().T
+    for _ in range(max_iterations):
+        r = (b * p) @ b.conj().T
+        t = np.linalg.norm(b.conj().T @ np.linalg.inv(r) @ half, axis=1)   # ||a_k^H R^-1 Rhat^1/2||
+        updated = p * t / (root_w * np.sum(root_w * p * t))              # (33), (34)
+        change = np.abs(updated - p).sum() / p.sum()
+        p = updated
+        if change < tolerance:
+            break
+    values, n_sources = _source_count(c, n_sources, n_snapshots)
+    return _result("spice", grid_rad, p[:n_grid], values, n_sources,
+                   {"noise_estimate": p[n_grid:].copy()})
+
+
+def samv2(covariance, positions_m, wavelength_m, iterations,
+          grid_rad=None, n_sources=None, n_snapshots=1):
+    """
+    SAMV-2. Abeida, Zhang & Li, IEEE TSP 61(4):933-944, 2013, Table 1, eqs.
+    (8), (9), (16).
+
+    R = A P A^H + sigma I; p_k <- p_k (a^H R^-1 Rhat R^-1 a) / (a^H R^-1 a),
+    sigma <- tr(R^-2 Rhat) / tr(R^-2). A fixed point satisfies
+    a^H R^-1 Rhat R^-1 a = a^H R^-1 a, the stochastic ML stationarity
+    condition for p_k.
+    """
+    c, a, grid_rad = _grid_dictionary(covariance, positions_m, wavelength_m, grid_rad)
+    n = a.shape[0]
+    p = np.einsum('ig,ij,jg->g', a.conj(), c, a).real / np.sum(np.abs(a) ** 2, axis=0) ** 2   # (8)
+    sigma = float(np.trace(c).real) / n                                  # (9)
+    for _ in range(iterations):
+        r_inv = np.linalg.inv((a * p) @ a.conj().T + sigma * np.eye(n))
+        ria = r_inv @ a
+        num = np.einsum('ig,ij,jg->g', ria.conj(), c, ria).real
+        den = np.einsum('ig,ig->g', a.conj(), ria).real
+        p = p * num / den                                                # (16)
+        r_inv2 = r_inv @ r_inv
+        sigma = float(np.trace(r_inv2 @ c).real / np.trace(r_inv2).real)   # (16)
+    values, n_sources = _source_count(c, n_sources, n_snapshots)
+    return _result("samv2", grid_rad, p, values, n_sources, {"noise_estimate": sigma})
+
+
+def iaa(covariance, positions_m, wavelength_m, iterations,
+        grid_rad=None, n_sources=None, n_snapshots=1):
+    """
+    IAA-APES power spectrum. Yardibi, Li, Stoica, Xue & Baggeroer, IEEE TAES
+    46(1):425-443, 2010, Table II.
+
+    R = A P A^H with no noise term; P_k = (1/N) sum_n |a^H R^-1 y(n)|^2 /
+    (a^H R^-1 a)^2, written through Rhat = (1/N) sum_n y(n) y(n)^H so it takes
+    the gauge-invariant covariance. The amplitude estimates are not formed.
+    """
+    c, a, grid_rad = _grid_dictionary(covariance, positions_m, wavelength_m, grid_rad)
+    p = np.einsum('ig,ij,jg->g', a.conj(), c, a).real / np.sum(np.abs(a) ** 2, axis=0) ** 2
+    for _ in range(iterations):
+        # pinv: A P A^H is singular when few p_k are non-zero.
+        ria = np.linalg.pinv((a * p) @ a.conj().T) @ a
+        den = np.einsum('ig,ig->g', a.conj(), ria).real
+        p = np.einsum('ig,ij,jg->g', ria.conj(), c, ria).real / den ** 2
+    values, n_sources = _source_count(c, n_sources, n_snapshots)
+    return _result("iaa", grid_rad, p, values, n_sources)
 
 
 def joint_aod_delay(v_stack, stream_gain_db, positions_m, frequencies_hz,
@@ -460,6 +505,23 @@ def joint_aod_delay(v_stack, stream_gain_db, positions_m, frequencies_hz,
 #
 # joint_aod_delay has no precision curve; at ~826 ms per solve it dominates
 # bench_precision.py.
+#
+# params are passed to the function. Iteration settings for spice, samv2 and
+# iaa, measured on the AWUS036AXM captures (9 buckets; full data and 1-, 5-
+# and 20-report subsets; 225 covariances) against a 5000-iteration answer:
+#
+#   spice  stops below 3e-5 relative power change, at most 5000 iterations.
+#          Leading bearing equal to the 5000-iteration answer in 100% of
+#          cases, top three in 93%; median 719 iterations, ~0.1 ms each at
+#          n=4. A fixed 15 settled none.
+#   samv2  15 iterations. The SAMV paper states no count; 15 is the IAA
+#          paper's (Table II). Not converged at 15 or at 5000 on these
+#          captures: the leading bearing settles by iteration 150 (median)
+#          and 1500 (90%).
+#   iaa    15 iterations, IAA paper Table II. Settled by 5 in every case.
+#
+# The capture-derived values describe this hardware class; re-derive them on
+# another.
 
 ESTIMATORS = {
     "music": {
@@ -472,25 +534,51 @@ ESTIMATORS = {
         "uses_frequency_dimension": False,
         "reference": "Schmidt 1986; Itahara et al., IEEE Access 2022 (BFI form)",
     },
-    "esprit": {
-        "function": esprit,
-        "input": "covariance",
-        "needs_uniform_linear": True,
-        "needs_geometry": True,
-        "min_reports": 1,
-        "handles_coherent": False,
-        "uses_frequency_dimension": False,
-        "reference": "Roy & Kailath, IEEE Trans. ASSP 37(7):984-995, 1989",
-    },
+    # Off the active set, kept for trial: ULA only, and shares eigh(C) with
+    # music. Restore the entry to enable it.
+    # "esprit": {
+    #     "function": esprit,
+    #     "input": "covariance",
+    #     "needs_uniform_linear": True,
+    #     "needs_geometry": True,
+    #     "min_reports": 1,
+    #     "handles_coherent": False,
+    #     "uses_frequency_dimension": False,
+    #     "reference": "Roy & Kailath, IEEE Trans. ASSP 37(7):984-995, 1989",
+    # },
     "spice": {
         "function": spice,
         "input": "covariance",
+        "params": {"tolerance": 3e-5, "max_iterations": 5000},
         "needs_uniform_linear": False,
         "needs_geometry": True,
         "min_reports": 1,
         "handles_coherent": True,
         "uses_frequency_dimension": False,
-        "reference": "Stoica, Babu & Li, IEEE TSP 59(2):629-638, 2011",
+        "reference": "Stoica, Babu & Li, IEEE TSP 59(2):629-638, 2011, eq. (33)",
+    },
+    "samv2": {
+        "function": samv2,
+        "input": "covariance",
+        "params": {"iterations": 15},
+        "needs_uniform_linear": False,
+        "needs_geometry": True,
+        "min_reports": 1,
+        "handles_coherent": True,
+        "uses_frequency_dimension": False,
+        "reference": "Abeida, Zhang & Li, IEEE TSP 61(4):933-944, 2013, eq. (16)",
+    },
+    "iaa": {
+        "function": iaa,
+        "input": "covariance",
+        "params": {"iterations": 15},
+        "needs_uniform_linear": False,
+        "needs_geometry": True,
+        "min_reports": 1,
+        "handles_coherent": True,
+        "uses_frequency_dimension": False,
+        "reference": "Yardibi, Li, Stoica, Xue & Baggeroer, IEEE TAES 46(1):425-443, "
+                     "2010, Table II",
     },
     "joint_aod_delay": {
         "function": joint_aod_delay,

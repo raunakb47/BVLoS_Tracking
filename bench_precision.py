@@ -73,7 +73,8 @@ def _estimate(name, v_stack, gains_db, positions, wavelength, frequencies,
         if spec["input"] == "covariance":
             covariance = aoa.bff_covariance(v_stack, gains_db)
             out = spec["function"](covariance, positions, wavelength,
-                                   n_snapshots=n_subcarriers)
+                                   n_snapshots=n_subcarriers,
+                                   **spec.get("params", {}))
         else:
             if frequencies is None:
                 return None
