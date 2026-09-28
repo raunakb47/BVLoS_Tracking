@@ -9,7 +9,7 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
 * **Per-packet decode.** Standard, Nc, Nr, channel width, codebook and subcarrier grouping are read from each frame's MIMO Control field, so one capture covers 2x1 through 4x4 and both Wi-Fi 5 and 6 without configuration. Reports are grouped into buckets keyed `{transmitter}_{beamformer}_{Nr}x{Nc}@{bw}`, which keeps a stack rectangular when a device changes configuration mid-capture.
 * **Append-only log as the only state.** Stage 2 writes observables once; a stage needing history reads further back rather than carrying its own state across chunk invocations.
 * **Capability-gated dispatch.** Each estimator declares what it requires — uniform linear geometry, a minimum report count, a frequency axis — and Stage 3 compares that against facts decoded in Stage 2. An estimator is applicable or not, and both outcomes are recorded with the reason. Adding one is a single registry entry.
-* **Estimators reported side by side.** MUSIC, ESPRIT, SPICE and a joint AoD/relative-delay method are run, never reconciled: agreement means the data supports a bearing, spread means it does not, and a single merged number would hide which.
+* **Estimators reported side by side.** MUSIC, SPICE, SAMV-2, IAA and a joint AoD/relative-delay method are run, never reconciled: agreement means the data supports a bearing, spread means it does not, and a single merged number would hide which.
 * **Two benches.** `bench_aoa.py` checks recovery of known angles through the standard's own compression; `bench_precision.py` measures how far each estimator moves when asked twice from different real data.
 
 **Not built yet.** No ranging leg: bearings are angular only, with no distance from RSSI. No Stage 4, so nothing renders a map. Stage 1 has never run against hardware.
@@ -34,7 +34,8 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
     ├── aoa.py                           AoD estimators and array diagnostics
     ├── bench_aoa.py                     synthetic ground-truth bench for aoa.py
     ├── bench_precision.py               estimator precision on captured data
-    ├── config.env                       capture interface, chunk period, filter
+    ├── config.env                       capture interface, chunk period, filter,
+    │                                    per-estimator report-count gates
     ├── 0_replay_pcap.sh                 offline replay of an existing capture
     │
     └── 4_Stage4_Inference.py            superseded, kept for reference while
@@ -66,7 +67,9 @@ nano BVLoS_Live_Tracker/config.env
 ```
 Set `CAPTURE_INTERFACE` to the monitor-mode interface and `CHUNK_TIME` to the
 rotation period in seconds. Standard, MIMO configuration and channel width are
-decoded per packet, so they are not configured here.
+decoded per packet, so they are not configured here. `MIN_REPORTS_<ESTIMATOR>`
+sets how many reports a bucket needs before that estimator runs; the file states
+the basis of the shipped values.
 
 
 ### 3. Launch the Pipeline (Choose Live or Simulation)

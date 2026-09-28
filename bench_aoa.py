@@ -157,11 +157,13 @@ def main():
     passed.append(_report("esprit", err < 6.0,
                           f"{[round(x, 1) for x in got]} vs {sorted(truth)}, {err:.2f} deg"))
 
-    r = aoa.spice(c, ula4, lam0)
-    got = _peaks_deg(r, 2)
-    err = min(abs(got[0] - min(truth)), abs(got[0] - max(truth))) if got else 99
-    passed.append(_report("spice finds a true bearing", err < 6.0,
-                          f"strongest {[round(x, 1) for x in got[:2]]} vs {sorted(truth)}"))
+    for name in ("spice", "samv2", "iaa"):
+        spec = aoa.ESTIMATORS[name]
+        r = spec["function"](c, ula4, lam0, **spec["params"])
+        got = _peaks_deg(r, 2)
+        err = min(abs(got[0] - min(truth)), abs(got[0] - max(truth))) if got else 99
+        passed.append(_report(f"{name} finds a true bearing", err < 6.0,
+                              f"strongest {[round(x, 1) for x in got[:2]]} vs {sorted(truth)}"))
 
     r = aoa.joint_aod_delay(v, g, ula4, freqs, n_sources=2)
     got = _peaks_deg(r, 2)
