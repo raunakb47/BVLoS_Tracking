@@ -44,6 +44,13 @@ _MGMT_HEADER_LEN = 24
 _FIXED_BODY_LEN = 12
 _IE_START = _MGMT_HEADER_LEN + _FIXED_BODY_LEN
 
+# Association Request body: Capability(2) + Listen Interval(2); Reassociation
+# Request adds Current AP Address(6). Elements follow.
+_IE_START_ASSOC = _MGMT_HEADER_LEN + 4
+_IE_START_REASSOC = _MGMT_HEADER_LEN + 10
+
+_SUBTYPE_ASSOC_REQUEST = 0
+_SUBTYPE_REASSOC_REQUEST = 2
 _SUBTYPE_BEACON = 8
 _SUBTYPE_PROBE_RESPONSE = 5
 _SUBTYPE_ACTION = 13
@@ -53,6 +60,7 @@ _IE_SSID = 0
 _IE_DS_PARAMETER_SET = 3
 _IE_COUNTRY = 7
 _IE_POWER_CONSTRAINT = 32
+_IE_POWER_CAPABILITY = 33
 
 def _import_capture_reader(wibfi_dir):
     """
@@ -69,15 +77,16 @@ def _mac(raw):
     return ":".join(f"{byte:02x}" for byte in raw)
 
 
-def _information_elements(frame):
+def _information_elements(frame, start=_IE_START):
     """
-    Walk the length-prefixed element list of a Beacon or Probe Response body.
+    Walk the length-prefixed element list of a management frame body from
+    start (a Beacon or Probe Response by default).
 
     Stops at the first element claiming more bytes than the frame holds;
     truncation and a corrupt length are indistinguishable and both end the walk.
     """
     elements = {}
-    offset = _IE_START
+    offset = start
     while offset + 2 <= len(frame):
         element_id, length = frame[offset], frame[offset + 1]
         if offset + 2 + length > len(frame):
@@ -117,9 +126,31 @@ def _advertised_tx_power_dbm(elements):
     return max_power_dbm, country_code
 
 
+def _power_capability(frame, subtype, capture_reader, buf, timestamp):
+    """
+    A power_capability record from an (Re)Association Request carrying a
+    Power Capability element, else None. The element holds the station's
+    minimum and maximum transmit power in the current channel, signed dBm:
+    the station's own statement of the most it can transmit.
+    """
+    start = _IE_START_ASSOC if subtype == _SUBTYPE_ASSOC_REQUEST else _IE_START_REASSOC
+    if len(frame) < start or capture_reader.radiotap_bad_fcs(buf):
+        return None
+    capability = _information_elements(frame, start).get(_IE_POWER_CAPABILITY)
+    if capability is None or len(capability) < 2:
+        return None
+    low, high = struct.unpack("bb", capability[:2])
+    return {"kind": "power_capability", "t": timestamp,
+            "transmitter": _mac(frame[10:16]), "bssid": _mac(frame[16:22]),
+            "min_dbm": float(low), "max_dbm": float(high),
+            "freq_mhz": capture_reader.radiotap_channel_mhz(buf)}
+
+
 def scan_chunk(path, capture_reader):
     """
-    One walk over the chunk, returning (feedback types present, beacon records).
+    One walk over the chunk, returning (feedback types present, beacon
+    records). Power Capability records from (Re)Association Requests ride in
+    the second list.
 
     The feedback types let the extractor run only for a type that has frames;
     an empty run still pays the interpreter start. Combining both answers in one
@@ -153,6 +184,12 @@ def scan_chunk(path, capture_reader):
                     frame, capture_reader.STANDARD_FOR_CATEGORY[category])
                 if reported is not None:
                     feedback_present.add(reported)
+            continue
+
+        if subtype in (_SUBTYPE_ASSOC_REQUEST, _SUBTYPE_REASSOC_REQUEST):
+            record = _power_capability(frame, subtype, capture_reader, buf, timestamp)
+            if record is not None:
+                beacons.append(record)
             continue
 
         if subtype not in (_SUBTYPE_BEACON, _SUBTYPE_PROBE_RESPONSE):
@@ -287,7 +324,7 @@ def observe(pcap_path, log_prefix, wibfi_dir):
     started = time.perf_counter()
     capture_reader = _import_capture_reader(wibfi_dir)
     jsonl_path, bin_path = log_prefix + ".jsonl", log_prefix + ".bin"
-    counts = {"bfi": 0, "beacon": 0, "probe_response": 0}
+    counts = {"bfi": 0, "beacon": 0, "probe_response": 0, "power_capability": 0}
     timing = {}
 
     with tempfile.TemporaryDirectory() as scratch, \

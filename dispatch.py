@@ -472,10 +472,13 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     mark = time.perf_counter()
     buckets = {}
     beacons = {}
+    capabilities = {}
     latest = None
     for record in observe.read_log(log_prefix):
         if record.get("kind") in ("beacon", "probe_response"):
             beacons.setdefault(record["bssid"], []).append(record)
+        if record.get("kind") == "power_capability":
+            capabilities[record["transmitter"]] = record
         if record.get("kind") == "bfi":
             buckets.setdefault(record["bucket"], []).append(record)
             if latest is None or record["t"] > latest:
@@ -527,6 +530,10 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
             facts, results = solve_bucket(pending, log_prefix, site, max_reports,
                                           gates, live,
                                           {n: emitted.get(n, -np.inf) for n in live})
+            # The client's own maximum transmit power, from its latest
+            # (Re)Association Request, for ranging; None when none was heard.
+            capability = capabilities.get(facts["transmitter"])
+            facts["tx_power_capability_dbm"] = capability and capability["max_dbm"]
             for result in results:
                 if result.get("ran"):
                     per_estimator[result["estimator"]] = per_estimator.get(
