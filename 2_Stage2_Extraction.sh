@@ -39,8 +39,8 @@ do
     python3 observe.py "$NEW_PCAP" "$LOG_PREFIX" "$WIBFI_DIR" "$TIMING_LOG" \
         2>>"$PIPELINE_LOG" | tee -a "$PIPELINE_LOG"
 
-    # Stage 3: log -> bearings. Re-solved over the whole log each time, since
-    # the log is the only state and a later chunk changes earlier buckets.
+    # Stage 3: log -> bearings. Each estimator solves the reports it has not
+    # yet output, per bucket, once they meet its gate (dispatch.solve).
     python3 dispatch.py "$LOG_PREFIX" "${SITE_JSON:--}" \
         2>>"$PIPELINE_LOG" | grep '^\[stage3\]' | tee -a "$PIPELINE_LOG"
 

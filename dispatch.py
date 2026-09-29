@@ -209,7 +209,8 @@ def applicable(name, spec, facts, min_reports):
     if spec["needs_uniform_linear"] and not facts["uniform_linear"]:
         return False, "geometry is not a uniform linear array"
     if facts["n_reports"] < min_reports:
-        return False, f"needs {min_reports} reports, bucket has {facts['n_reports']}"
+        return False, (f"needs {min_reports} reports, {facts['n_reports']} "
+                       "pending since its last output")
     if spec["needs_geometry"] and facts["n_antennas"] < 2:
         return False, f"needs at least 2 elements, beamformer has {facts['n_antennas']}"
     if spec["uses_frequency_dimension"]:
@@ -226,13 +227,30 @@ def applicable(name, spec, facts, min_reports):
     return True, None
 
 
+def _slice_id(t_first, t_last, n_reports):
+    """Identifies a report set within a bucket: first and last timestamp, count."""
+    return f"{t_first!r}/{t_last!r}/{n_reports}"
+
+
 def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
-                 live=None):
+                 live=None, since=None):
     """
     Run every live, applicable estimator over one bucket, returning their
     results and the facts selection used. gates defaults to report_gates(),
     live to live_estimators().
+
+    since maps an estimator to the t_last of its previous output for this
+    bucket; it runs only on reports after that, once they meet its gate.
+    Absent from since, an estimator runs on every record given. Each result
+    that ran carries its own n_reports, t_first, t_last and slice_id; facts
+    describe the union of the records given.
+
+    role "primary" marks an estimator's own output. For each slice a primary
+    used, every other live estimator whose gate the slice meets also runs on
+    exactly that slice with role "companion", so outputs with one slice_id rest
+    on identical reports.
     """
+    since = since or {}
     gates = report_gates() if gates is None else gates
     live = live_estimators() if live is None else live
     records = sorted(records, key=lambda r: r["t"])
@@ -253,9 +271,9 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
     frequencies = subcarrier_frequencies(head["standard"], head["bw"],
                                          centre_mhz, head["nsubc"], head["ng"])
 
-    per_report = [aoa.bff_covariance(v_stack[i:i + 1], gains_db[i:i + 1])
-                  for i in range(len(records))]
-    covariance = aoa.bff_covariance(v_stack, gains_db)
+    per_report = np.array([aoa.bff_covariance(v_stack[i:i + 1], gains_db[i:i + 1])
+                           for i in range(len(records))])
+    times = np.array([r["t"] for r in records])
 
     facts = {
         "bucket": head["bucket"],
@@ -273,6 +291,8 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
         "codebook": head["codebook"],
         "n_reports": len(records),
         "time_span_s": records[-1]["t"] - records[0]["t"],
+        "t_first": records[0]["t"],
+        "t_last": records[-1]["t"],
         "coherence": coherence(per_report),
         "uniform_linear": bool(aoa.is_uniform_linear(positions)),
         "geometry_source": geometry_source,
@@ -282,32 +302,33 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
         "sensitivity": (aoa.sensitivity(positions, wavelength) if wavelength else None),
     }
 
-    results = []
-    for name, spec in aoa.ESTIMATORS.items():
-        if name not in live:
-            results.append({"estimator": name, "ran": False,
-                            "reason": f"not in {_LIVE_VARIABLE}"})
-            continue
-        ok, reason = applicable(name, spec, facts, gates[name])
-        if not ok:
-            results.append({"estimator": name, "ran": False, "reason": reason})
-            continue
+    def run(name, spec, mask, role):
+        """One estimator on the reports selected by mask; a result entry."""
         try:
             if spec["input"] == "covariance":
-                out = spec["function"](covariance, positions, wavelength,
+                # Mean of the per-report terms: equal to bff_covariance over
+                # the same reports, and additive, so any slice costs no V work.
+                out = spec["function"](per_report[mask].mean(axis=0),
+                                       positions, wavelength,
                                        n_snapshots=head["nsubc"],
                                        **spec.get("params", {}))
             else:
-                out = spec["function"](v_stack, gains_db, positions, frequencies)
+                out = spec["function"](v_stack[mask], gains_db[mask],
+                                       positions, frequencies)
         except Exception as exc:                      # noqa: BLE001
-            results.append({"estimator": name, "ran": False,
-                            "reason": f"{type(exc).__name__}: {exc}"})
-            continue
+            return {"estimator": name, "ran": False, "role": role,
+                    "reason": f"{type(exc).__name__}: {exc}"}
         candidates = [{"bearing_deg": float(np.degrees(a)), "strength": float(s)}
                       for a, s in out["candidates_rad"][:8]]
+        t_first, t_last = float(times[mask].min()), float(times[mask].max())
         entry = {
             "estimator": name,
             "ran": True,
+            "role": role,
+            "slice_id": _slice_id(t_first, t_last, int(mask.sum())),
+            "n_reports": int(mask.sum()),
+            "t_first": t_first,
+            "t_last": t_last,
             "n_sources": out["n_sources"],
             "candidates": candidates,
             "eigenvalues": (None if out["eigenvalues"] is None
@@ -317,7 +338,40 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
             peak = int(np.argmin(np.abs(out["grid_rad"] -
                                         np.radians(candidates[0]["bearing_deg"]))))
             entry["relative_delay_s"] = float(out["delay_at_peak_s"][peak])
+        return entry
+
+    # Primary outputs: each estimator on its own pending reports, once they
+    # meet its gate. These set the estimator's carry state.
+    results = []
+    slices = {}
+    for name, spec in aoa.ESTIMATORS.items():
+        if name not in live:
+            results.append({"estimator": name, "ran": False,
+                            "reason": f"not in {_LIVE_VARIABLE}"})
+            continue
+        pending = (times > since[name]) if name in since else np.ones(len(times), bool)
+        ok, reason = applicable(name, spec, dict(facts, n_reports=int(pending.sum())),
+                                gates[name])
+        if not ok:
+            results.append({"estimator": name, "ran": False, "reason": reason})
+            continue
+        entry = run(name, spec, pending, "primary")
         results.append(entry)
+        if entry["ran"]:
+            slices.setdefault(entry["slice_id"], pending)
+
+    # Companion outputs: every other live estimator on exactly each slice a
+    # primary output used, so Stage 4 can compare estimators on identical
+    # reports without delaying any primary. They leave carry state unchanged.
+    done = {(r["estimator"], r["slice_id"]) for r in results if r.get("ran")}
+    for slice_id, mask in slices.items():
+        for name, spec in aoa.ESTIMATORS.items():
+            if name not in live or (name, slice_id) in done:
+                continue
+            ok, _ = applicable(name, spec, dict(facts, n_reports=int(mask.sum())),
+                               gates[name])
+            if ok:
+                results.append(run(name, spec, mask, "companion"))
 
     facts.pop("frequencies_hz")
     return facts, results
@@ -332,10 +386,18 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     solving it: the read grows with the whole session's history, the solve with
     the bucket count and each estimator's grid.
 
-    Results are appended, not overwritten. A later chunk adds reports to buckets
-    already solved, so each pass is a fresh snapshot of every bucket rather than
-    an increment; pass and tag identify which pass a record belongs to, and
-    report() renders the last.
+    Each estimator carries its own pending reports per bucket: those after the
+    t_last of its previous output in out_path. It runs once they meet its
+    report-count gate, then starts again from the next report, so every report
+    reaches one output of each estimator whose gate its bucket eventually meets,
+    and outputs of one estimator never share a report. Staleness is carried in
+    each output's t_first and t_last. Reports below a gate when capture stops
+    stay pending. A bucket with no pending report for any live estimator gets
+    no record that pass, as does one with no report newer than its previous
+    record. pass and tag identify which pass a record belongs to,
+    and report() renders the last.
+
+    max_reports keeps only the latest pending reports and discards the rest.
 
     lag_s is measured against wall clock, so it reads as pipeline lag on a live
     capture and as the recording's age on a replay.
@@ -357,19 +419,37 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
 
     out_path = out_path or os.environ.get("SOLVE_OUT") or (log_prefix + ".solve.jsonl")
     pass_index = 0
+    since = {}
+    seen = {}
     if os.path.exists(out_path):
         with open(out_path) as handle:
             for line in handle:
-                if line.strip():
-                    pass_index = max(pass_index,
-                                     json.loads(line).get("pass", 0) + 1)
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                pass_index = max(pass_index, entry.get("pass", 0) + 1)
+                bucket = entry["facts"]["bucket"]
+                if "t_last" in entry["facts"]:
+                    seen[bucket] = max(seen.get(bucket, -np.inf), entry["facts"]["t_last"])
+                emitted = since.setdefault(bucket, {})
+                for result in entry["results"]:
+                    if (result.get("ran") and "t_last" in result
+                            and result.get("role", "primary") == "primary"):
+                        emitted[result["estimator"]] = max(
+                            emitted.get(result["estimator"], -np.inf), result["t_last"])
     written = 0
     per_estimator = {}
     mark = time.perf_counter()
     with open(out_path, "a") as handle:
         for key in sorted(buckets, key=lambda k: -len(buckets[k])):
-            facts, results = solve_bucket(buckets[key], log_prefix, site,
-                                          max_reports, gates, live)
+            emitted = since.get(key, {})
+            oldest = min((emitted.get(name, -np.inf) for name in live), default=np.inf)
+            pending = [r for r in buckets[key] if r["t"] > oldest]
+            if not pending or max(r["t"] for r in pending) <= seen.get(key, -np.inf):
+                continue
+            facts, results = solve_bucket(pending, log_prefix, site, max_reports,
+                                          gates, live,
+                                          {n: emitted.get(n, -np.inf) for n in live})
             for result in results:
                 if result.get("ran"):
                     per_estimator[result["estimator"]] = per_estimator.get(
@@ -433,8 +513,10 @@ def report(solve_path, stream=sys.stdout):
             extra = ""
             if "relative_delay_s" in result:
                 extra = f"   relative delay {result['relative_delay_s'] * 1e9:+.0f} ns"
+            role = "  (companion)" if result.get("role") == "companion" else ""
             print(f"     {result['estimator']:17s} L={result['n_sources']}"
-                  f"  {bearings}{extra}", file=stream)
+                  f"  {bearings}{extra}   n={result.get('n_reports', '?')}{role}",
+                  file=stream)
             # A linear array cannot separate a bearing from its mirror about
             # the array axis, so each candidate names two directions.
             if result["candidates"]:
