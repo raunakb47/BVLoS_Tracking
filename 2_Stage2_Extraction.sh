@@ -1,12 +1,12 @@
 #!/bin/bash
 # ==============================================================================
 # Module: 2_Stage2_Extraction.sh
-# Watch WATCH_DIR and run Stage 2 then Stage 3 on each chunk that lands.
+# Watch WATCH_DIR and run Stages 2 to 4 on each chunk that lands.
 # ==============================================================================
 source ./config.env
 
 SESSION_DIR="${SESSION_DIR:-./session_$(date +%Y%m%d_%H%M%S)}"
-mkdir -p "$SESSION_DIR/stage1" "$SESSION_DIR/stage2" "$SESSION_DIR/stage3"
+mkdir -p "$SESSION_DIR/stage1" "$SESSION_DIR/stage2" "$SESSION_DIR/stage3" "$SESSION_DIR/stage4"
 
 LOG_PREFIX="$SESSION_DIR/stage2/observe"
 SOLVE_OUT="$SESSION_DIR/stage3/solve.jsonl"
@@ -49,9 +49,13 @@ do
     python3 dispatch.py "$LOG_PREFIX" "${SITE_JSON:--}" \
         2>>"$PIPELINE_LOG" | grep '^\[stage3\]' | tee -a "$PIPELINE_LOG"
 
+    # Stage 4: bearings and ranges -> fixes from measured quantities only.
+    python3 locate.py "$SOLVE_OUT" "$SESSION_DIR" \
+        2>>"$PIPELINE_LOG" | tee -a "$PIPELINE_LOG"
+
     DONE=$(date +%s.%N)
     CHAIN=$(echo "$DONE $ARRIVED" | awk '{printf "%.0f", ($1-$2)*1000}')
-    echo "[chain ] $CHUNK  arrival to stage3 complete: ${CHAIN} ms" | tee -a "$PIPELINE_LOG"
+    echo "[chain ] $CHUNK  arrival to stage4 complete: ${CHAIN} ms" | tee -a "$PIPELINE_LOG"
     echo "{\"stage\":\"chain\",\"chunk\":\"$CHUNK\",\"ms\":$CHAIN}" >> "$TIMING_LOG"
 
     rm -f "$NEW_PCAP"
