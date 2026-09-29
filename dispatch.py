@@ -227,6 +227,28 @@ def applicable(name, spec, facts, min_reports):
     return True, None
 
 
+def rssi_summary(readings):
+    """
+    Median of the combined signal and of each chain, in dBm, over the readings
+    that have one; None when none do.
+
+    readings is a sequence of (combined dBm or None, [chain dBm, ...]). The
+    median is taken in dB: it commutes with the dB conversion, unlike a mean.
+    Chains are summarised only when every reading carries the same number.
+    """
+    combined = [c for c, _ in readings if c is not None]
+    if not combined:
+        return None
+    chains = [ch for c, ch in readings if c is not None]
+    widths = {len(ch) for ch in chains}
+    return {
+        "median_dbm": float(np.median(combined)),
+        "n": len(combined),
+        "chains_median_dbm": ([float(v) for v in np.median(np.array(chains), axis=0)]
+                              if len(widths) == 1 and widths != {0} else None),
+    }
+
+
 def _slice_id(t_first, t_last, n_reports):
     """Identifies a report set within a bucket: first and last timestamp, count."""
     return f"{t_first!r}/{t_last!r}/{n_reports}"
@@ -274,6 +296,7 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
     per_report = np.array([aoa.bff_covariance(v_stack[i:i + 1], gains_db[i:i + 1])
                            for i in range(len(records))])
     times = np.array([r["t"] for r in records])
+    readings = [(r.get("rssi"), r.get("chains") or []) for r in records]
 
     facts = {
         "bucket": head["bucket"],
@@ -329,6 +352,8 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
             "n_reports": int(mask.sum()),
             "t_first": t_first,
             "t_last": t_last,
+            # Monitor's reception of the client's reports over the same slice.
+            "client_rssi": rssi_summary([readings[i] for i in np.flatnonzero(mask)]),
             "n_sources": out["n_sources"],
             "candidates": candidates,
             "eigenvalues": (None if out["eigenvalues"] is None
@@ -377,6 +402,39 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
     return facts, results
 
 
+def ap_record(bssid, beacons, beamformers, pass_index, tag):
+    """
+    One AP's Beacons and Probe Responses since its previous record: the
+    monitor's reception of the AP, for AP ranging in Stage 4.
+
+    A report names its AP only as the receiver address, which need not equal
+    the BSSID, so beamformers lists those in the log matching the BSSID or any
+    transmitter address seen with it; empty means no report links to this AP.
+    tx_power_dbm is the advertised ceiling from the latest frame carrying it,
+    not a measured power.
+    """
+    transmitters = sorted({b["transmitter"] for b in beacons})
+    advertised = [b["tx_power_dbm"] for b in beacons if b.get("tx_power_dbm") is not None]
+    ssids = [b["ssid"] for b in beacons if b.get("ssid")]
+    return {
+        "kind": "ap",
+        "pass": pass_index,
+        "tag": tag,
+        "at": time.time(),
+        "bssid": bssid,
+        "transmitters": transmitters,
+        "beamformers": sorted(m for m in beamformers
+                              if m == bssid or m in transmitters),
+        "ssid": ssids[-1] if ssids else None,
+        "channel": beacons[-1].get("channel"),
+        "tx_power_dbm": advertised[-1] if advertised else None,
+        "n_frames": len(beacons),
+        "t_first": beacons[0]["t"],
+        "t_last": beacons[-1]["t"],
+        "rssi": rssi_summary([(b.get("rssi"), b.get("chains") or []) for b in beacons]),
+    }
+
+
 def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
           tag=None):
     """
@@ -399,6 +457,9 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
 
     max_reports keeps only the latest pending reports and discards the rest.
 
+    Beacons and Probe Responses are appended per BSSID as "ap" records, each
+    covering the frames since that BSSID's previous record (ap_record()).
+
     lag_s is measured against wall clock, so it reads as pipeline lag on a live
     capture and as the recording's age on a replay.
     """
@@ -409,8 +470,11 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
 
     mark = time.perf_counter()
     buckets = {}
+    beacons = {}
     latest = None
     for record in observe.read_log(log_prefix):
+        if record.get("kind") in ("beacon", "probe_response"):
+            beacons.setdefault(record["bssid"], []).append(record)
         if record.get("kind") == "bfi":
             buckets.setdefault(record["bucket"], []).append(record)
             if latest is None or record["t"] > latest:
@@ -421,6 +485,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     pass_index = 0
     since = {}
     seen = {}
+    ap_seen = {}
     if os.path.exists(out_path):
         with open(out_path) as handle:
             for line in handle:
@@ -428,6 +493,10 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
                     continue
                 entry = json.loads(line)
                 pass_index = max(pass_index, entry.get("pass", 0) + 1)
+                if entry.get("kind") == "ap":
+                    ap_seen[entry["bssid"]] = max(ap_seen.get(entry["bssid"], -np.inf),
+                                                  entry["t_last"])
+                    continue
                 bucket = entry["facts"]["bucket"]
                 if "t_last" in entry["facts"]:
                     seen[bucket] = max(seen.get(bucket, -np.inf), entry["facts"]["t_last"])
@@ -440,7 +509,14 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     written = 0
     per_estimator = {}
     mark = time.perf_counter()
+    beamformers = {records[0]["beamformer"] for records in buckets.values()}
     with open(out_path, "a") as handle:
+        for bssid in sorted(beacons):
+            fresh = sorted((b for b in beacons[bssid] if b["t"] > ap_seen.get(bssid, -np.inf)),
+                           key=lambda b: b["t"])
+            if fresh:
+                handle.write(json.dumps(ap_record(bssid, fresh, beamformers, pass_index,
+                                                  tag)) + "\n")
         for key in sorted(buckets, key=lambda k: -len(buckets[k])):
             emitted = since.get(key, {})
             oldest = min((emitted.get(name, -np.inf) for name in live), default=np.inf)
@@ -482,7 +558,9 @@ def report(solve_path, stream=sys.stdout):
     carry an unknown per-beamformer rotation, so what compares against a real
     room is the pattern across one beamformer's clients, not a single figure.
     """
-    entries = [json.loads(line) for line in open(solve_path) if line.strip()]
+    entries = [entry for entry in (json.loads(line) for line in open(solve_path)
+                                   if line.strip())
+               if entry.get("kind", "solve") == "solve"]
     if not entries:
         return
     last = max(entry.get("pass", 0) for entry in entries)
