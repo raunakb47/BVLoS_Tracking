@@ -37,6 +37,7 @@ SUBCARRIER_SPACING_HZ = {"AC": 312500.0, "AX": 78125.0}
 _C_LIGHT = 299792458.0
 
 _GATE_PREFIX = "MIN_REPORTS_"
+_LIVE_VARIABLE = "LIVE_ESTIMATORS"
 
 
 def report_gates(environ=None):
@@ -68,6 +69,27 @@ def report_gates(environ=None):
                              f"report(s) {name} requires")
         gates[name] = count
     return gates
+
+
+def live_estimators(environ=None):
+    """
+    Estimators run in a pass, from LIVE_ESTIMATORS in config.env: names from
+    aoa.ESTIMATORS separated by whitespace. Unset, every entry runs.
+
+    Which estimators fit the chunk period is a property of the deployment's
+    hardware and channel width, so it is configured, not coded. An unknown name
+    raises rather than leaving an intended estimator silently off.
+    """
+    environ = os.environ if environ is None else environ
+    value = environ.get(_LIVE_VARIABLE)
+    if value is None:
+        return set(aoa.ESTIMATORS)
+    names = set(value.split())
+    unknown = sorted(names - set(aoa.ESTIMATORS))
+    if unknown:
+        raise ValueError(f"{_LIVE_VARIABLE} names no estimator: {', '.join(unknown)}; "
+                         "expected any of " + ", ".join(aoa.ESTIMATORS))
+    return names
 
 
 def load_site(path):
@@ -204,12 +226,15 @@ def applicable(name, spec, facts, min_reports):
     return True, None
 
 
-def solve_bucket(records, log_prefix, site, max_reports=None, gates=None):
+def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
+                 live=None):
     """
-    Run every applicable estimator over one bucket, returning their results and
-    the facts selection used. gates defaults to report_gates().
+    Run every live, applicable estimator over one bucket, returning their
+    results and the facts selection used. gates defaults to report_gates(),
+    live to live_estimators().
     """
     gates = report_gates() if gates is None else gates
+    live = live_estimators() if live is None else live
     records = sorted(records, key=lambda r: r["t"])
     if max_reports:
         records = records[-max_reports:]
@@ -259,6 +284,10 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None):
 
     results = []
     for name, spec in aoa.ESTIMATORS.items():
+        if name not in live:
+            results.append({"estimator": name, "ran": False,
+                            "reason": f"not in {_LIVE_VARIABLE}"})
+            continue
         ok, reason = applicable(name, spec, facts, gates[name])
         if not ok:
             results.append({"estimator": name, "ran": False, "reason": reason})
@@ -313,6 +342,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     """
     started = time.perf_counter()
     gates = report_gates()
+    live = live_estimators()
     site = load_site(site_path)
 
     mark = time.perf_counter()
@@ -339,7 +369,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
     with open(out_path, "a") as handle:
         for key in sorted(buckets, key=lambda k: -len(buckets[k])):
             facts, results = solve_bucket(buckets[key], log_prefix, site,
-                                          max_reports, gates)
+                                          max_reports, gates, live)
             for result in results:
                 if result.get("ran"):
                     per_estimator[result["estimator"]] = per_estimator.get(
@@ -416,7 +446,8 @@ def report(solve_path, stream=sys.stdout):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: dispatch.py <log_prefix> [site.json] [max_reports]\n"
-              "  env: SOLVE_OUT, SOLVE_REPORT, TIMING_LOG, MIN_REPORTS_<ESTIMATOR>",
+              "  env: SOLVE_OUT, SOLVE_REPORT, TIMING_LOG, LIVE_ESTIMATORS, "
+              "MIN_REPORTS_<ESTIMATOR>",
               file=sys.stderr)
         raise SystemExit(2)
     site_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "-" else None
