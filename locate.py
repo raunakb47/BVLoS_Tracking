@@ -26,7 +26,9 @@ Output, one JSON record per line in <session>/stage4/locate.jsonl:
   kind "ap"   : an AP's range from the monitor, from a Stage 3 "ap" record
   kind "fix"  : one Stage 3 output of a client, with
                 frame "anchor" (delta hypotheses) or "ap_array" (bearings),
-                the client's range from the monitor, its AP's range
+                the client's range from the monitor, its AP's range; an
+                anchor fix also carries "points", its candidate positions in
+                the monitor frame (monitor at the origin, AP at (-r, 0))
 Each record names the Stage 3 line it came from (source_line), so a run
 resumes after the last line it processed.
 """
@@ -88,6 +90,47 @@ def in_anchor_region(point, delta_deg, client_range, ap_range):
     delta = np.radians(delta_deg)
     gap = float(np.hypot(s * np.cos(delta) - r, s * np.sin(delta)))
     return not client_range or _within(gap, client_range)
+
+
+def ray_ring_points(delta_deg, r, d):
+    """
+    Where the ray from the AP at delta_deg (from the AP-to-monitor direction)
+    meets the ring of radius d about the monitor, the monitor being r from the
+    AP. Returns [(x, y, kind)] in the monitor frame: the monitor at the
+    origin, the AP at (-r, 0). kind is "crossing" for each crossing at or
+    beyond the AP; "closest" for the ray's closest approach when it misses
+    the ring, the distance then disagreeing with the bearing.
+    """
+    delta = np.radians(delta_deg)
+    along = r * np.cos(delta)
+    across_sq = d * d - (r * np.sin(delta)) ** 2
+    if across_sq >= 0:
+        roots = sorted({along - np.sqrt(across_sq), along + np.sqrt(across_sq)})
+        kinds = [(s_, "crossing") for s_ in roots if s_ >= 0]
+    else:
+        kinds = [(along, "closest")] if along >= 0 else []
+    return [(float(s_ * np.cos(delta) - r), float(s_ * np.sin(delta)), kind)
+            for s_, kind in kinds]
+
+
+def anchor_points(hypotheses, ap_range, client_range):
+    """
+    Candidate client positions in the monitor frame for an anchor fix: each
+    hypothesis's rays, in both mirror scenes, crossing the client's median
+    range about the monitor. Empty unless both medians are known.
+    """
+    r = ap_range and ap_range.get("median_m")
+    d = client_range and client_range.get("median_m")
+    if not r or d is None:
+        return []
+    points = []
+    for index, hypothesis in enumerate(hypotheses):
+        for branch, delta in enumerate(hypothesis["delta_deg"]):
+            for scene, sign in (("a", 1.0), ("b", -1.0)):
+                for x, y, kind in ray_ring_points(sign * delta, r, d):
+                    points.append({"x_m": x, "y_m": y, "scene": scene, "hypothesis": index,
+                                   "branch": branch, "kind": kind})
+    return points
 
 
 def _latest_anchor(anchor_outputs, beamformer, estimator):
@@ -180,6 +223,8 @@ def fixes(solve_path, start_line, anchor_mac, regdomain, model_name, k):
                          "delta_deg": relative_angles(b, c["bearing_deg"]),
                          "strength": s, "anchor_strength": c["strength"]}
                         for b, s in bearings for c in anchor["candidates"]]
+                    record["points"] = anchor_points(record["hypotheses"], ap_range,
+                                                     record["client_range"])
                 yield record
 
 

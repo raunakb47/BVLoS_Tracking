@@ -16,7 +16,7 @@ PIPELINE_LOG="$SESSION_DIR/pipeline.log"
 export TIMING_LOG
 export SOLVE_REPORT="$SESSION_DIR/stage3/solve.txt"
 
-echo "[*] Stage 2/3 watcher on $WATCH_DIR -> $SESSION_DIR"
+echo "[*] Stage 2-4 watcher on $WATCH_DIR -> $SESSION_DIR"
 
 # The host's regulatory domain: the transmit ceiling ranging falls back to
 # when no captured Beacon states one. Recorded once; on a replay it is the
@@ -27,6 +27,13 @@ iw reg get > "$SESSION_DIR/regdomain.txt" 2>/dev/null || rm -f "$SESSION_DIR/reg
 # than failing Stage 3 on every chunk with the error only in pipeline.log.
 python3 -c 'import dispatch; print("[*] Report gates:", dispatch.report_gates())' || exit 1
 python3 -c 'import dispatch; print("[*] Live estimators:", sorted(dispatch.live_estimators()))' || exit 1
+
+# Stage 4's live view, stopped with the watcher.
+if [[ -n "$RENDER_PORT" ]]; then
+    python3 render.py "$SESSION_DIR" "$RENDER_PORT" 2>>"$PIPELINE_LOG" &
+    RENDER_PID=$!
+    trap 'kill "$RENDER_PID" 2>/dev/null' EXIT
+fi
 
 # Both events are needed, one per delivery mechanism: tcpdump closes a rotated
 # chunk (close_write), while 0_replay_pcap.sh renames one in (moved_to).
@@ -51,6 +58,8 @@ do
 
     # Stage 4: bearings and ranges -> fixes from measured quantities only.
     python3 locate.py "$SOLVE_OUT" "$SESSION_DIR" \
+        2>>"$PIPELINE_LOG" | tee -a "$PIPELINE_LOG"
+    python3 confidence.py "$SOLVE_OUT" "$SESSION_DIR" \
         2>>"$PIPELINE_LOG" | tee -a "$PIPELINE_LOG"
 
     DONE=$(date +%s.%N)

@@ -318,6 +318,8 @@ def solve_bucket(records, log_prefix, site, max_reports=None, gates=None,
         "t_last": records[-1]["t"],
         "coherence": coherence(per_report),
         "uniform_linear": bool(aoa.is_uniform_linear(positions)),
+        "element_spacing_m": (float(np.linalg.norm(positions[1] - positions[0]))
+                              if aoa.is_uniform_linear(positions) else None),
         "geometry_source": geometry_source,
         "orientation_deg": orientation,
         "frequencies_hz": frequencies,
