@@ -18,6 +18,11 @@ export SOLVE_REPORT="$SESSION_DIR/stage3/solve.txt"
 
 echo "[*] Stage 2/3 watcher on $WATCH_DIR -> $SESSION_DIR"
 
+# The host's regulatory domain: the transmit ceiling ranging falls back to
+# when no captured Beacon states one. Recorded once; on a replay it is the
+# replaying host's, not the capture site's.
+iw reg get > "$SESSION_DIR/regdomain.txt" 2>/dev/null || rm -f "$SESSION_DIR/regdomain.txt"
+
 # A malformed MIN_REPORTS_* or LIVE_ESTIMATORS stops the watcher here rather
 # than failing Stage 3 on every chunk with the error only in pipeline.log.
 python3 -c 'import dispatch; print("[*] Report gates:", dispatch.report_gates())' || exit 1

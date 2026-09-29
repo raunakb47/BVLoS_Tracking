@@ -93,8 +93,11 @@ def _advertised_tx_power_dbm(elements):
     802.11 Local Maximum Transmit Power. Returns (dbm, country_code), either
     part None when absent.
 
-    The Country element holds a 3-byte country string then (first channel,
-    channel count, max power) triplets; the first triplet is taken.
+    The Country element holds a 3-byte country string then 3-byte triplets:
+    (first channel, channel count, max power in signed dBm) or, with a first
+    byte of 201 or more, an operating-extension triplet carrying no power.
+    The highest subband maximum is taken, so the result bounds every channel
+    the element lists without deciding which one is in use.
 
     A regulatory ceiling, not an instantaneous measurement: an AP running
     802.11h transmit power control sits below it with no further signalling.
@@ -103,7 +106,11 @@ def _advertised_tx_power_dbm(elements):
     if country is None or len(country) < 6:
         return None, None
     country_code = country[:2].decode("ascii", errors="replace")
-    max_power_dbm = float(country[5])
+    limits = [struct.unpack("b", country[i + 2:i + 3])[0]
+              for i in range(3, len(country) - 2, 3) if country[i] < 201]
+    if not limits:
+        return None, country_code
+    max_power_dbm = float(max(limits))
     constraint = elements.get(_IE_POWER_CONSTRAINT)
     if constraint:
         max_power_dbm -= float(constraint[0])
@@ -172,6 +179,9 @@ def scan_chunk(path, capture_reader):
                      if ssid_bytes is not None else None),
             "ssid_hidden": ssid_bytes is not None and len(ssid_bytes) == 0,
             "channel": int(channel[0]) if channel else None,
+            # Monitor's tuned frequency, as on bfi records; sets the
+            # wavelength ranging on this frame depends on.
+            "freq_mhz": capture_reader.radiotap_channel_mhz(buf),
             "tx_power_dbm": tx_power_dbm,
             "country": country_code,
             "rssi": signal_chains[0] if signal_chains else None,

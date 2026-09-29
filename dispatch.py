@@ -427,6 +427,7 @@ def ap_record(bssid, beacons, beamformers, pass_index, tag):
                               if m == bssid or m in transmitters),
         "ssid": ssids[-1] if ssids else None,
         "channel": beacons[-1].get("channel"),
+        "freq_mhz": beacons[-1].get("freq_mhz"),
         "tx_power_dbm": advertised[-1] if advertised else None,
         "n_frames": len(beacons),
         "t_first": beacons[0]["t"],
