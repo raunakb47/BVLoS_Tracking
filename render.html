@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BVLoS Stage 4</title>
+<!--
+  Live view of <session>/stage4/locate.jsonl and segments.jsonl, served by
+  render.py.
+
+  Draws only what Stage 4 measured. Nothing is oriented to the world or to
+  north. Track "reconciled" (the default once confidence.py has written
+  segments) draws each segment's reconciled bearing coloured by the number of
+  estimator groups backing it: 1 red, 2 amber, 3 green; dotted where two
+  directions tie; faint while provisional. Any other track choice draws the
+  raw per-estimator fixes.
+
+  Trajectory (needs an anchor): monitor at the origin, metres, the x axis
+  from the AP to the monitor as the anchor measured it. Each point is a BFI
+  bearing ray from the AP crossing the client's RSSI range about the monitor
+  (locate.py "points"). A track joins each fix's leading candidates by
+  nearest continuation; the array mirror and the two ring crossings stay as
+  separate branches. Scene B is the mirror image across the AP-monitor line.
+
+  Bearing track: the BFI bearing at the AP's array against capture time, the
+  view available without an anchor.
+
+  Rays: the anchor-relative hypotheses as rays from the AP. AP array: both
+  directions a linear-array bearing names, 0 deg = broadside. The rotation
+  control turns a picture for reading only.
+
+  Ranges are from the monitor: band [near_m, far_m] about median_m, open where
+  the path-loss model does not reach.
+-->
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #d9d8d2;
+  --grid: #e9e8e3; --ap: #1d1d1b; --mon: #b4540a; --band: rgba(180, 84, 10, 0.12);
+  --e0: #2f6fdf; --e1: #d14f7a; --e2: #1f9d74; --e3: #8a5cd6; --e4: #b38600;
+  --warn: #b4540a;
+  --s1: #c8322b; --s2: #c98a00; --s3: #1f8f4e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --muted: #9c9b95; --line: #3a3935;
+    --grid: #2a2926; --ap: #ecebe6; --mon: #f0a052; --band: rgba(240, 160, 82, 0.14);
+    --e0: #6c9cf0; --e1: #ea7ea0; --e2: #4cc59b; --e3: #ab8be6; --e4: #dcb33c;
+    --warn: #f0a052;
+    --s1: #ef6b62; --s2: #e6b43a; --s3: #4cc57f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --muted: #9c9b95; --line: #3a3935;
+  --grid: #2a2926; --ap: #ecebe6; --mon: #f0a052; --band: rgba(240, 160, 82, 0.14);
+  --e0: #6c9cf0; --e1: #ea7ea0; --e2: #4cc59b; --e3: #ab8be6; --e4: #dcb33c;
+  --warn: #f0a052;
+  --s1: #ef6b62; --s2: #e6b43a; --s3: #4cc57f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+header .meta { color: var(--muted); font-size: 13px; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+section h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: none; border: 0; color: var(--ink); padding: 4px 10px; font: inherit; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.seg button:disabled { color: var(--muted); cursor: default; }
+.seg button:disabled[aria-pressed="true"] { background: var(--grid); color: var(--muted); }
+label.rot { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+#map { width: 100%; aspect-ratio: 1; display: block; }
+#track { width: 100%; display: block; }
+[hidden] { display: none !important; }
+.note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; }
+tr.dev { cursor: pointer; }
+tr.dev[aria-selected="true"] td { background: var(--grid); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.side { display: grid; gap: 16px; align-content: start; }
+.side svg { width: 100%; display: block; }
+.warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>BVLoS Stage 4</h1>
+  <span class="meta" id="session">connecting…</span>
+  <span class="meta" id="latest"></span>
+  <span class="meta" id="live"></span>
+</header>
+<main>
+  <section>
+    <div class="controls">
+      <label class="rot">AP <select id="ap"></select></label>
+      <div class="seg" role="group" aria-label="View">
+        <button data-view="track" aria-pressed="false">Trajectory</button>
+        <button data-view="bearing" aria-pressed="false">Bearing track</button>
+        <button data-view="anchor" aria-pressed="true">Rays</button>
+        <button data-view="array" aria-pressed="false">AP array</button>
+      </div>
+      <div class="seg" role="group" aria-label="Scene" id="scene-group">
+        <button data-scene="both" aria-pressed="true">Both scenes</button>
+        <button data-scene="a" aria-pressed="false">Scene A</button>
+        <button data-scene="b" aria-pressed="false">Scene B</button>
+      </div>
+      <label class="rot" id="est-label">Track <select id="est"></select></label>
+      <label class="rot">Rotate view <input id="rot" type="range" min="0" max="359" value="0"> <span id="rot-v">0°</span></label>
+    </div>
+    <svg id="map" viewBox="-110 -110 220 220" role="img" aria-label="Stage 4 map"></svg>
+    <svg id="track" viewBox="0 0 640 400" role="img" aria-label="Bearing track" hidden></svg>
+    <p class="note" id="map-note"></p>
+    <div class="legend" id="legend"></div>
+  </section>
+  <div class="side">
+    <section>
+      <h2>Devices</h2>
+      <table><thead><tr><th>Device</th><th>AP</th><th>Age</th><th>Fixes</th></tr></thead>
+        <tbody id="devices"></tbody></table>
+      <p class="note">Age is behind the newest data in the log (capture clock). Select a row to focus it; select it again for all.</p>
+    </section>
+    <section>
+      <h2>Ranges from the monitor</h2>
+      <svg id="ranges" viewBox="0 0 360 40"></svg>
+      <p class="note" id="range-note"></p>
+    </section>
+    <section>
+      <h2 id="hist-title">Bearing history</h2>
+      <svg id="history" viewBox="0 0 360 160"></svg>
+      <p class="note">AP array bearing (−90° to 90°) of every hypothesis since capture start, per estimator.</p>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const EST_ORDER = ["spice", "samv2", "iaa", "music", "joint_aod_delay", "esprit"];
+const state = { offset: 0, segOffset: 0, segments: 0, devices: new Map(), latestT: null, firstT: null, view: "array",
+  viewChosen: false, scene: "both", rot: 0, focus: null, lastPoll: null, meta: {} };
+
+function el(tag, attrs, parent) {
+  const node = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+function estColor(name) {
+  const i = EST_ORDER.indexOf(name);
+  return `var(--e${i < 0 ? 4 : Math.min(i, 4)})`;
+}
+function fmt(v, d = 1) { return v == null ? "–" : Number(v).toFixed(d); }
+function rad(deg) { return deg * Math.PI / 180; }
+
+function ingest(rec) {
+  if (rec.kind === "segment") { ingestSegment(rec); return; }
+  if (rec.kind !== "fix") return;
+  let dev = state.devices.get(rec.device);
+  if (!dev) { dev = { id: rec.device, beamformer: rec.beamformer, fixes: [], latest: {} };
+    state.devices.set(rec.device, dev); }
+  dev.fixes.push(rec);
+  if (state.pendingSegments) {
+    const waiting = state.pendingSegments; state.pendingSegments = null;
+    waiting.forEach(ingestSegment);
+  }
+  const prev = dev.latest[rec.estimator];
+  if (!prev || rec.t_last >= prev.t_last) dev.latest[rec.estimator] = rec;
+  dev.newest = dev.newest && dev.newest.t_last > rec.t_last ? dev.newest : rec;
+  state.latestT = Math.max(state.latestT ?? -Infinity, rec.t_last);
+  state.firstT = Math.min(state.firstT ?? Infinity, rec.t_first);
+}
+
+// A segment's latest state replaces its earlier one (provisional, then
+// revised or kept). Anchor segments set the reference, not a track.
+function ingestSegment(rec) {
+  if (rec.role !== "client") return;
+  const dev = state.devices.get(rec.device);
+  if (!dev) { state.pendingSegments = (state.pendingSegments || []).concat([rec]); return; }
+  dev.segments = dev.segments || new Map();
+  if (!dev.segments.has(rec.slice_id)) state.segments++;
+  dev.segments.set(rec.slice_id, rec);
+}
+function stepColor(step) { return step ? `var(--s${Math.min(step, 3)})` : "var(--muted)"; }
+
+// Each AP has its own array frame, so the map shows one AP at a time.
+function apsSeen() {
+  const aps = new Map();
+  for (const d of state.devices.values()) {
+    const a = aps.get(d.beamformer) || { id: d.beamformer, devices: 0, fixes: 0 };
+    a.devices++; a.fixes += d.fixes.length; aps.set(d.beamformer, a);
+  }
+  return [...aps.values()].sort((x, y) => y.fixes - x.fixes);
+}
+function currentAp() {
+  const aps = apsSeen();
+  if (!aps.length) return null;
+  if (!state.apChosen || !aps.some(a => a.id === state.ap)) state.ap = aps[0].id;
+  return state.ap;
+}
+function visibleDevices() {
+  const ap = currentAp();
+  const all = [...state.devices.values()].filter(d => d.beamformer === ap);
+  return state.focus ? all.filter(d => d.id === state.focus) : all;
+}
+function hasPoints() {
+  const ap = currentAp();
+  for (const d of state.devices.values()) if (d.beamformer === ap)
+    for (const f of d.fixes.concat([...(d.segments?.values() || [])])) if (f.points && f.points.length) return true;
+  return false;
+}
+function hasAnchor() {
+  const ap = currentAp();
+  for (const d of state.devices.values()) if (d.beamformer === ap)
+    for (const f of Object.values(d.latest)) if (f.frame === "anchor") return true;
+  return false;
+}
+
+// Distances along the ray at angle delta from the AP whose distance from the
+// monitor (at (r, 0)) lies within the client's band; runs of [s0, s1].
+function consistentRuns(delta, r, band, reach) {
+  const near = band.near_m, far = band.far_m, runs = [];
+  if (near == null && far == null) return runs;
+  const steps = 240; let start = null;
+  for (let i = 0; i <= steps; i++) {
+    const s = reach * i / steps;
+    const gap = Math.hypot(s * Math.cos(rad(delta)) - r, s * Math.sin(rad(delta)));
+    const ok = (near == null || gap >= near) && (far == null || gap <= far);
+    if (ok && start == null) start = s;
+    if ((!ok || i === steps) && start != null) { runs.push([start, ok ? s : reach * (i - 1) / steps]); start = null; }
+  }
+  return runs;
+}
+
+function drawMap() {
+  const map = document.getElementById("map"), track = document.getElementById("track");
+  if (state.view === "track" || state.view === "bearing") {
+    const note = [];
+    const svg = state.view === "track" ? map : track;
+    map.toggleAttribute("hidden", state.view !== "track");
+    track.toggleAttribute("hidden", state.view !== "bearing");
+    map.replaceChildren(); track.replaceChildren();
+    if (state.view === "track") drawTrajectory(map, note); else drawBearingTrack(track, note);
+    if (state.est !== "reconciled") note.push("Raw per-estimator fixes, not reconciled.");
+    document.getElementById("map-note").textContent = note.join(" ");
+    return;
+  }
+  map.removeAttribute("hidden"); track.setAttribute("hidden", ""); track.replaceChildren();
+  drawRays();
+}
+
+function drawRays() {
+  const svg = document.getElementById("map");
+  svg.replaceChildren();
+  const g = el("g", { transform: `rotate(${-state.rot})` }, svg);
+  const devices = visibleDevices();
+  const anchorView = state.view === "anchor";
+  const note = [];
+  const R = 100;
+
+  // Scale: metres when the anchor view has a monitor distance, else unitless.
+  let scale = null, reach = null, apBand = null;
+  if (anchorView) {
+    let maxD = 0;
+    for (const d of devices) for (const f of Object.values(d.latest)) {
+      if (f.frame !== "anchor") continue;
+      const ap = f.ap_range; const c = f.client_range || {};
+      if (ap && ap.median_m != null) {
+        apBand = apBand || ap;
+        maxD = Math.max(maxD, ap.median_m, ap.far_m ?? 0,
+          ap.median_m + (c.far_m ?? c.median_m ?? c.near_m ?? 0));
+      }
+    }
+    if (maxD > 0) { reach = maxD * 1.05; scale = R / reach; }
+  }
+
+  // Rings every "nice" step when scaled.
+  if (scale) {
+    const raw = reach / 4, mag = 10 ** Math.floor(Math.log10(raw));
+    const step = [1, 2, 5, 10].map(m => m * mag).find(s => s >= raw);
+    for (let m = step; m <= reach; m += step) {
+      el("circle", { cx: 0, cy: 0, r: m * scale, fill: "none", stroke: "var(--grid)", "stroke-width": 0.4 }, g);
+      el("text", { x: 1, y: -m * scale - 1, "font-size": 4, fill: "var(--muted)",
+        transform: `rotate(${state.rot} 1 ${-m * scale - 1})` }, g).textContent = `${m} m`;
+    }
+  } else {
+    el("circle", { cx: 0, cy: 0, r: R, fill: "none", stroke: "var(--grid)", "stroke-width": 0.4 }, g);
+  }
+
+  if (anchorView) {
+    const r = apBand ? apBand.median_m : null;
+    const monX = r != null ? r * scale : R;
+    // Reference ray and the monitor.
+    el("line", { x1: 0, y1: 0, x2: R * 1.05, y2: 0, stroke: "var(--mon)", "stroke-width": 0.6,
+      "stroke-dasharray": "2 2" }, g);
+    if (apBand && scale) {
+      const n = apBand.near_m ?? 0, f = apBand.far_m ?? reach;
+      el("line", { x1: n * scale, y1: 0, x2: Math.min(f, reach) * scale, y2: 0,
+        stroke: "var(--band)", "stroke-width": 5, "stroke-linecap": "round" }, g);
+    }
+    // Client bands about the monitor (focused device, or the only one).
+    const one = devices.length === 1 ? devices[0] : null;
+    if (one && scale && r != null) {
+      const f = one.newest; const c = f.client_range || {};
+      const ring = m => `M ${monX + m * scale} 0 a ${m * scale} ${m * scale} 0 1 0 ${-2 * m * scale} 0 ` +
+        `a ${m * scale} ${m * scale} 0 1 0 ${2 * m * scale} 0 Z`;
+      if (c.far_m != null) el("path", { d: ring(c.far_m) + (c.near_m != null ? " " + ring(c.near_m) : ""),
+        "fill-rule": "evenodd", fill: "var(--band)", stroke: "var(--mon)", "stroke-width": 0.4 }, g);
+      else if (c.near_m != null) el("path", { d: ring(c.near_m), fill: "none", stroke: "var(--mon)",
+        "stroke-width": 0.4, "stroke-dasharray": "1.5 1.5" }, g);
+    }
+    el("rect", { x: monX - 2.5, y: -2.5, width: 5, height: 5, fill: "var(--mon)" }, g);
+    el("text", { x: monX, y: -5, "font-size": 5, fill: "var(--mon)", "text-anchor": "middle",
+      transform: `rotate(${state.rot} ${monX} -5)` }, g).textContent = r != null ? "monitor" : "monitor (distance unknown)";
+
+    // Hypothesis rays.
+    let drawn = 0;
+    for (const d of devices) for (const f of Object.values(d.latest)) {
+      if (f.frame !== "anchor") continue;
+      const sMax = Math.max(...f.hypotheses.map(h => h.strength), 1e-300);
+      const aMax = Math.max(...f.hypotheses.map(h => h.anchor_strength), 1e-300);
+      for (const h of f.hypotheses) {
+        const w = Math.max(0.08, (h.strength / sMax) * (h.anchor_strength / aMax));
+        const deltas = [];
+        if (state.scene !== "b") deltas.push(...h.delta_deg);
+        if (state.scene !== "a") deltas.push(...h.delta_deg.map(x => -x));
+        for (const delta of deltas) {
+          const x = R * Math.cos(rad(delta)), y = -R * Math.sin(rad(delta));
+          el("line", { x1: 0, y1: 0, x2: x, y2: y, stroke: estColor(f.estimator),
+            "stroke-width": 0.5, "stroke-opacity": w }, g);
+          if (scale && r != null && f.client_range)
+            for (const [s0, s1] of consistentRuns(delta, r, f.client_range, reach)) {
+              el("line", { x1: s0 * scale * Math.cos(rad(delta)), y1: -s0 * scale * Math.sin(rad(delta)),
+                x2: s1 * scale * Math.cos(rad(delta)), y2: -s1 * scale * Math.sin(rad(delta)),
+                stroke: estColor(f.estimator), "stroke-width": 2.2, "stroke-opacity": w,
+                "stroke-linecap": "round" }, g);
+            }
+          drawn++;
+        }
+      }
+    }
+    if (!hasAnchor()) note.push("No anchor fix yet: set ANCHOR_MAC to the monitor host's associated interface, or use the AP array view.");
+    note.push("Reference: AP → monitor, measured. Not north.");
+    if (!scale) note.push("No AP range yet, so no distances: rays show direction only.");
+    else note.push("Thick segments: along the ray where the client's range from the monitor holds.");
+    if (state.scene === "both") note.push("Scene B mirrors scene A across the reference ray; the array cannot tell them apart.");
+  } else {
+    // AP array frame: axis, broadside, both directions per bearing.
+    el("line", { x1: 0, y1: -12, x2: 0, y2: 12, stroke: "var(--ap)", "stroke-width": 1.2 }, g);
+    el("line", { x1: 0, y1: 0, x2: R * 1.05, y2: 0, stroke: "var(--muted)", "stroke-width": 0.4,
+      "stroke-dasharray": "2 2" }, g);
+    el("text", { x: R * 1.02, y: -3, "font-size": 5, fill: "var(--muted)", "text-anchor": "end",
+      transform: `rotate(${state.rot} ${R * 1.02} -3)` }, g).textContent = "0° broadside";
+    for (const d of devices) for (const f of Object.values(d.latest)) {
+      const sMax = Math.max(...f.hypotheses.map(h => h.strength), 1e-300);
+      const seen = new Set();
+      for (const h of f.hypotheses) {
+        const b = h.bearing_deg ?? h.directions_deg[0];
+        if (seen.has(b)) continue; seen.add(b);
+        for (const dir of [b, 180 - b]) {
+          el("line", { x1: 0, y1: 0, x2: R * Math.cos(rad(dir)), y2: -R * Math.sin(rad(dir)),
+            stroke: estColor(f.estimator), "stroke-width": 0.7,
+            "stroke-opacity": Math.max(0.08, h.strength / sMax) }, g);
+        }
+      }
+    }
+    note.push("AP array frame: 0° is array broadside; the array's orientation to the world is unknown.");
+    note.push("Each bearing is drawn with its mirror about the array axis. Distance from the AP is not measured.");
+  }
+  el("circle", { cx: 0, cy: 0, r: 3, fill: "var(--ap)" }, g);
+  el("text", { x: 0, y: 9, "font-size": 5, fill: "var(--ink)", "text-anchor": "middle",
+    transform: `rotate(${state.rot} 0 9)` }, g).textContent = "AP";
+  note.push("Raw per-estimator fixes, not reconciled.");
+  document.getElementById("map-note").textContent = note.join(" ");
+}
+
+// Fixes of the current AP's devices that the track draws: the chosen
+// estimator's, or every estimator's when "all".
+function trackFixes(d) {
+  if (state.est === "reconciled")
+    return [...(d.segments?.values() || [])].sort((a, b) => a.t_last - b.t_last);
+  return d.fixes.filter(f => state.est === "all" || f.estimator === state.est)
+    .sort((a, b) => a.t_last - b.t_last);
+}
+
+// A fix's leading candidates in the chosen scene: points of its strongest
+// hypothesis (client strength x anchor strength, each relative to the fix's
+// own strongest). The array mirror and the two ring crossings stay as
+// separate candidates; nothing here decides between them.
+function leading(f, scene) {
+  if (f.kind === "segment")   // its points are already its leading bearing(s)
+    return (f.points || []).filter(p => p.scene === scene).map(p => ({ ...p, fix: f }));
+  const sMax = Math.max(...f.hypotheses.map(h => h.strength), 1e-300);
+  const aMax = Math.max(...f.hypotheses.map(h => h.anchor_strength), 1e-300);
+  const w = f.hypotheses.map(h => (h.strength / sMax) * (h.anchor_strength / aMax));
+  const best = Math.max(...w);
+  return (f.points || []).filter(p => p.scene === scene && w[p.hypothesis] >= best * 0.999)
+    .map(p => ({ ...p, fix: f }));
+}
+
+// Branches: every leading candidate of the first fix starts one; each later
+// fix extends each branch with its candidate nearest the branch's last point.
+// Branches that arrive at the same point merge. Continuity only: no
+// confidence is implied.
+function branches(fixes, scene) {
+  let tracks = null;
+  for (const f of fixes) {
+    const cands = leading(f, scene);
+    if (!cands.length) continue;
+    if (!tracks) { tracks = cands.map(c => [c]); continue; }
+    const next = [], seen = new Set();
+    for (const t of tracks) {
+      const last = t[t.length - 1];
+      let best = cands[0], bd = Infinity;
+      for (const c of cands) {
+        const dd = Math.hypot(c.x_m - last.x_m, c.y_m - last.y_m);
+        if (dd < bd) { bd = dd; best = c; }
+      }
+      const key = `${best.x_m.toFixed(3)},${best.y_m.toFixed(3)}`;
+      if (seen.has(key)) continue;
+      seen.add(key); next.push([...t, best]);
+    }
+    tracks = next;
+  }
+  return tracks || [];
+}
+
+function drawTrajectory(svg, note) {
+  const devices = visibleDevices();
+  const scenes = state.scene === "both" ? ["a", "b"] : [state.scene];
+  const per = devices.map(d => ({ d, fixes: trackFixes(d) }));
+  let apR = null;
+  for (const { fixes } of per) for (const f of fixes) if (f.ap_range && f.ap_range.median_m) apR = f.ap_range.median_m;
+  const pts = [];
+  for (const { fixes } of per) for (const f of fixes) for (const p of f.points || [])
+    if (scenes.includes(p.scene)) pts.push(p);
+  if (!pts.length || apR == null) {
+    note.push("No positions yet: a trajectory needs an anchor fix, the AP's range from the monitor and the client's.");
+    return;
+  }
+  const xs = pts.map(p => p.x_m).concat([0, -apR]), ys = pts.map(p => p.y_m).concat([0]);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const half = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 2) / 2 * 1.1;
+  const sc = 100 / half;
+  const X = x => (x - cx) * sc, Y = y => -(y - cy) * sc;
+  const g = el("g", { transform: `rotate(${-state.rot})` }, svg);
+  const up = (x, y) => `rotate(${state.rot} ${x} ${y})`;
+  // metre grid
+  const raw = half / 3, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(v => v >= raw);
+  for (let v = Math.ceil((cx - half) / step) * step; v <= cx + half; v += step) {
+    el("line", { x1: X(v), y1: -100, x2: X(v), y2: 100, stroke: "var(--grid)", "stroke-width": 0.3 }, g);
+    el("text", { x: X(v) + 1, y: 98, "font-size": 3.5, fill: "var(--muted)", transform: up(X(v) + 1, 98) }, g).textContent = `${+v.toFixed(2)} m`;
+  }
+  for (let v = Math.ceil((cy - half) / step) * step; v <= cy + half; v += step) {
+    el("line", { x1: -100, y1: Y(v), x2: 100, y2: Y(v), stroke: "var(--grid)", "stroke-width": 0.3 }, g);
+    el("text", { x: -99, y: Y(v) - 1, "font-size": 3.5, fill: "var(--muted)", transform: up(-99, Y(v) - 1) }, g).textContent = `${+v.toFixed(2)} m`;
+  }
+  // every candidate, faint
+  for (const p of pts) el("circle", { cx: X(p.x_m), cy: Y(p.y_m), r: 0.5, fill: "var(--muted)", "fill-opacity": 0.25 }, g);
+  // tracks
+  let nTracks = 0;
+  for (const { d, fixes } of per) for (const scene of scenes) {
+    for (const t of branches(fixes, scene)) {
+      nTracks++;
+      const dash = scene === "b" && state.scene === "both" ? "2 1.5" : null;
+      for (let i = 1; i < t.length; i++) {
+        const a = t[i - 1], b = t[i];
+        const x1 = X(a.x_m), y1 = Y(a.y_m), x2 = X(b.x_m), y2 = Y(b.y_m);
+        const seg = b.fix.kind === "segment";
+        const colour = seg ? stepColor(b.fix.step) : estColor(b.fix.estimator);
+        const lineDash = seg && b.fix.dotted ? "0.4 1.2" : dash;
+        el("line", { x1, y1, x2, y2, stroke: colour, "stroke-width": seg ? 1.1 : 0.9,
+          "stroke-dasharray": lineDash, "stroke-linecap": seg && b.fix.dotted ? "round" : "butt",
+          "stroke-opacity": seg && b.fix.state === "provisional" ? 0.55 : 0.9 }, g);
+        const len = Math.hypot(x2 - x1, y2 - y1);
+        if (len > 3) {
+          const ux = (x2 - x1) / len, uy = (y2 - y1) / len, hx = x2 - ux * 1.2, hy = y2 - uy * 1.2;
+          el("path", { d: `M ${hx} ${hy} L ${hx - ux * 2.4 - uy * 1.2} ${hy - uy * 2.4 + ux * 1.2} ` +
+            `L ${hx - ux * 2.4 + uy * 1.2} ${hy - uy * 2.4 - ux * 1.2} Z`, fill: colour,
+            "fill-opacity": seg && b.fix.state === "provisional" ? 0.55 : 1 }, g);
+        }
+      }
+      for (const p of t) {
+        if (p.kind === "closest") el("path", { d: `M ${X(p.x_m) - 1} ${Y(p.y_m) - 1} l 2 2 m -2 0 l 2 -2`,
+          stroke: "var(--warn)", "stroke-width": 0.5 }, g);
+        else el("circle", { cx: X(p.x_m), cy: Y(p.y_m), r: 0.9, fill: "var(--panel)", stroke: "var(--ink)", "stroke-width": 0.35 }, g);
+      }
+      const last = t[t.length - 1];
+      el("circle", { cx: X(last.x_m), cy: Y(last.y_m), r: 2.4, fill: "none", stroke: "var(--ink)", "stroke-width": 0.6 }, g);
+      el("text", { x: X(last.x_m), y: Y(last.y_m) + 5.5, "font-size": 3.5, fill: "var(--ink)", "text-anchor": "middle",
+        transform: up(X(last.x_m), Y(last.y_m) + 5.5) }, g).textContent =
+        devices.length > 1 ? d.id.slice(-5) : `now (${fmt(state.latestT - last.fix.t_last, 0)} s)`;
+    }
+  }
+  // AP and monitor
+  el("rect", { x: X(-apR) - 2, y: Y(0) - 2, width: 4, height: 4, fill: "var(--panel)", stroke: "var(--ap)", "stroke-width": 0.7 }, g);
+  el("text", { x: X(-apR) + 3, y: Y(0) + 1.3, "font-size": 4, fill: "var(--ink)", transform: up(X(-apR) + 3, Y(0) + 1.3) }, g).textContent = "AP";
+  el("path", { d: `M ${X(0)} ${Y(0) - 2.4} L ${X(0) + 2.2} ${Y(0) + 1.6} L ${X(0) - 2.2} ${Y(0) + 1.6} Z`, fill: "var(--mon)" }, g);
+  el("text", { x: X(0) + 3, y: Y(0) + 1.3, "font-size": 4, fill: "var(--mon)", transform: up(X(0) + 3, Y(0) + 1.3) }, g).textContent = "monitor";
+  note.push("Monitor at the origin, metres. The x axis points from the AP to the monitor, as the anchor measured it; it is not north.");
+  note.push("Each point: the BFI bearing ray from the AP crossing the client's RSSI range about the monitor (median).");
+  note.push(`${nTracks} branch${nTracks === 1 ? "" : "es"}: the array mirror and the two ring crossings stay separate until the data merges them. ✕ marks a ray that misses the range ring (closest approach).`);
+  if (state.scene === "both") note.push("Dashed: scene B, the mirror image across the AP–monitor line.");
+  if (state.est === "reconciled") note.push("Arrow colour: estimator groups backing the segment's bearing. Dotted: two directions tie. Faint: provisional, until the longer slice covering it arrives.");
+}
+
+function drawBearingTrack(svg, note) {
+  const devices = visibleDevices();
+  const x0 = 44, x1 = 630, y0 = 10, y1 = 370;
+  if (state.firstT == null) return;
+  const span = Math.max(1, state.latestT - state.firstT);
+  const X = t => x0 + (x1 - x0) * (t - state.firstT) / span;
+  const Y = b => y0 + (y1 - y0) * (90 - b) / 180;
+  for (const b of [-90, -60, -30, 0, 30, 60, 90]) {
+    el("line", { x1: x0, y1: Y(b), x2: x1, y2: Y(b), stroke: "var(--grid)" }, svg);
+    el("text", { x: x0 - 6, y: Y(b) + 4, "font-size": 11, fill: "var(--muted)", "text-anchor": "end" }, svg).textContent = `${b}°`;
+  }
+  for (const t of [0, span / 2, span]) el("text", { x: X(state.firstT + t), y: 392, "font-size": 11, fill: "var(--muted)",
+    "text-anchor": "middle" }, svg).textContent = `+${fmt(t, 0)} s`;
+  for (const d of devices) {
+    const fixes = trackFixes(d);
+    if (state.est === "reconciled") {
+      let prev = null;
+      for (const f of fixes) {
+        const tm = (f.t_first + f.t_last) / 2;
+        for (const b of f.bearings_deg) el("circle", { cx: X(tm), cy: Y(b), r: 2.6, fill: stepColor(f.step),
+          "fill-opacity": f.state === "provisional" ? 0.5 : 1 }, svg);
+        if (prev && f.bearings_deg.length && prev.bearings_deg.length) {
+          const pb = prev.bearings_deg[0], nb = f.bearings_deg.reduce((a, b) => Math.abs(b - pb) < Math.abs(a - pb) ? b : a);
+          el("line", { x1: X((prev.t_first + prev.t_last) / 2), y1: Y(pb), x2: X(tm), y2: Y(nb), stroke: stepColor(f.step),
+            "stroke-width": 1.4, "stroke-dasharray": f.dotted ? "1 3" : null, "stroke-linecap": "round",
+            "stroke-opacity": f.state === "provisional" ? 0.5 : 0.9 }, svg);
+        }
+        if (f.bearings_deg.length) prev = f;
+      }
+      continue;
+    }
+    const byEst = {};
+    for (const f of fixes) {
+      const sMax = Math.max(...f.hypotheses.map(h => h.strength), 1e-300);
+      const tm = (f.t_first + f.t_last) / 2, seen = new Set();
+      let top = null;
+      for (const h of f.hypotheses) {
+        const b = h.bearing_deg ?? h.directions_deg[0];
+        if (seen.has(b)) continue; seen.add(b);
+        if (!top || h.strength > top.s) top = { b, s: h.strength };
+        el("circle", { cx: X(tm), cy: Y(b), r: 2, fill: estColor(f.estimator),
+          "fill-opacity": Math.max(0.1, h.strength / sMax) }, svg);
+      }
+      (byEst[f.estimator] = byEst[f.estimator] || []).push([X(tm), Y(top.b)]);
+    }
+    for (const [e, line] of Object.entries(byEst)) if (line.length > 1)
+      el("polyline", { points: line.map(p => p.join(",")).join(" "), fill: "none", stroke: estColor(e),
+        "stroke-width": 1.2, "stroke-opacity": 0.8 }, svg);
+  }
+  note.push("Bearing at the AP's array (0° = broadside) against capture time, as extracted from the BFI reports.");
+  if (state.est === "reconciled") note.push("Dots: each segment's reconciled bearing, coloured by the estimator groups backing it; two dots where directions tie.");
+  else note.push("Dots: every candidate, opacity relative to that fix's strongest; line: each fix's strongest candidate.");
+  if (devices.length > 1) note.push("Several devices share this AP: select one in the list to follow it alone.");
+}
+
+function drawLegend() {
+  if (state.est === "reconciled" && (state.view === "track" || state.view === "bearing")) {
+    const box = document.getElementById("legend");
+    box.replaceChildren();
+    for (const [step, text] of [[1, "1 group"], [2, "2 groups"], [3, "3 groups agree"]]) {
+      const span = document.createElement("span");
+      span.innerHTML = `<i style="background:${stepColor(step)}"></i>${text}`;
+      box.appendChild(span);
+    }
+    const span = document.createElement("span");
+    span.textContent = "groups: subspace (music) · covariance fit (spice) · weighted LS (samv2, iaa)";
+    box.appendChild(span);
+    return;
+  }
+  const seen = new Set();
+  for (const d of state.devices.values()) for (const e of Object.keys(d.latest)) seen.add(e);
+  const box = document.getElementById("legend");
+  box.replaceChildren();
+  for (const e of EST_ORDER.filter(x => seen.has(x)).concat([...seen].filter(x => !EST_ORDER.includes(x)))) {
+    const span = document.createElement("span");
+    span.innerHTML = `<i style="background:${estColor(e)}"></i>${e}`;
+    box.appendChild(span);
+  }
+  if (seen.size) {
+    const span = document.createElement("span");
+    span.textContent = "opacity: strength relative to that fix's strongest";
+    box.appendChild(span);
+  }
+}
+
+function drawDevices() {
+  const body = document.getElementById("devices");
+  body.replaceChildren();
+  const devices = [...state.devices.values()].sort((a, b) => b.newest.t_last - a.newest.t_last);
+  for (const d of devices) {
+    const tr = document.createElement("tr");
+    tr.className = "dev";
+    tr.setAttribute("aria-selected", state.focus === d.id);
+    const age = state.latestT - d.newest.t_last;
+    tr.innerHTML = `<td class="mono">${d.id}</td><td class="mono">${d.beamformer.slice(-8)}</td>` +
+      `<td>${fmt(age, 0)} s</td><td>${d.fixes.length}</td>`;
+    tr.onclick = () => {
+      state.focus = state.focus === d.id ? null : d.id;
+      if (state.focus) { state.ap = d.beamformer; state.apChosen = true; }
+      drawAll();
+    };
+    body.appendChild(tr);
+  }
+}
+
+function drawRanges() {
+  const svg = document.getElementById("ranges");
+  svg.replaceChildren();
+  const rows = [];
+  const devices = visibleDevices().sort((a, b) => b.newest.t_last - a.newest.t_last);
+  const aps = new Map();
+  for (const d of devices) {
+    rows.push({ label: d.id.slice(-8), band: d.newest.client_range || {} });
+    if (d.newest.ap_range && !aps.has(d.beamformer)) aps.set(d.beamformer, d.newest.ap_range);
+  }
+  for (const [bf, band] of aps) rows.push({ label: "AP " + bf.slice(-5), band, ap: true });
+  const vals = rows.flatMap(r => [r.band.near_m, r.band.median_m, r.band.far_m, ...(r.band.valid_m || [])])
+    .filter(v => v != null);
+  const max = vals.length ? Math.max(...vals) * 1.05 : 1;
+  const x0 = 70, x1 = 350, rowH = 18;
+  svg.setAttribute("viewBox", `0 0 360 ${Math.max(40, rows.length * rowH + 24)}`);
+  const X = v => x0 + (x1 - x0) * v / max;
+  rows.forEach((row, i) => {
+    const y = 10 + i * rowH, b = row.band;
+    el("text", { x: 0, y: y + 4, "font-size": 10, fill: row.ap ? "var(--mon)" : "var(--ink)",
+      class: "mono" }, svg).textContent = row.label;
+    el("line", { x1: x0, y1: y, x2: x1, y2: y, stroke: "var(--grid)" }, svg);
+    if (b.valid_m) el("line", { x1: X(b.valid_m[0]), y1: y + 6, x2: X(b.valid_m[1]), y2: y + 6,
+      stroke: "var(--line)", "stroke-width": 2 }, svg);
+    if (b.near_m == null && b.median_m == null && b.far_m == null) {
+      el("text", { x: x0 + 4, y: y + 4, "font-size": 9, fill: "var(--muted)" }, svg).textContent =
+        b.outside === "above" ? `beyond ${b.valid_m[1]} m (model range)` :
+        b.outside === "below" ? `under ${b.valid_m[0]} m (model range)` :
+        b.outside === "frequency" ? "frequency outside model" :
+        b.power_source == null && b.loss_db == null ? "no transmit power known" : "no range";
+      return;
+    }
+    const lo = b.near_m ?? (b.valid_m ? b.valid_m[0] : 0), hi = b.far_m ?? (b.valid_m ? b.valid_m[1] : max);
+    el("line", { x1: X(lo), y1: y, x2: X(hi), y2: y, stroke: row.ap ? "var(--mon)" : "var(--ink)",
+      "stroke-width": 4, "stroke-opacity": 0.35 }, svg);
+    if (b.far_m == null) el("text", { x: X(hi) + 2, y: y + 3, "font-size": 9, fill: "var(--muted)" }, svg).textContent = "›";
+    if (b.near_m == null) el("text", { x: X(lo) - 6, y: y + 3, "font-size": 9, fill: "var(--muted)" }, svg).textContent = "‹";
+    if (b.median_m != null) el("line", { x1: X(b.median_m), y1: y - 5, x2: X(b.median_m), y2: y + 5,
+      stroke: row.ap ? "var(--mon)" : "var(--ink)", "stroke-width": 1.5 }, svg);
+  });
+  const axisY = rows.length * rowH + 16;
+  for (const t of [0, max / 2, max]) el("text", { x: X(t), y: axisY, "font-size": 9, fill: "var(--muted)",
+    "text-anchor": "middle" }, svg).textContent = `${fmt(t, 0)} m`;
+  const any = devices[0] && devices[0].newest.client_range;
+  document.getElementById("range-note").textContent = any ?
+    `Model ${any.model} (${any.recommendation}), band ±${any.k}σ with σ = ${any.sigma_db} dB. Grey rule: distances the model covers. ` +
+    `‹ › an open side the model does not reach. Power is a maximum (${any.power_source ?? "none"}), so a quieter transmitter is nearer.` : "";
+}
+
+function drawHistory() {
+  const svg = document.getElementById("history");
+  svg.replaceChildren();
+  const devices = visibleDevices();
+  document.getElementById("hist-title").textContent =
+    devices.length === 1 ? `Bearing history · ${devices[0].id}` : "Bearing history · select a device";
+  if (devices.length !== 1 || state.firstT == null) return;
+  const x0 = 30, x1 = 355, y0 = 8, y1 = 140;
+  const span = Math.max(1, state.latestT - state.firstT);
+  const X = t => x0 + (x1 - x0) * (t - state.firstT) / span;
+  const Y = b => y0 + (y1 - y0) * (90 - b) / 180;
+  for (const b of [-90, 0, 90]) {
+    el("line", { x1: x0, y1: Y(b), x2: x1, y2: Y(b), stroke: "var(--grid)" }, svg);
+    el("text", { x: x0 - 4, y: Y(b) + 3, "font-size": 9, fill: "var(--muted)", "text-anchor": "end" }, svg).textContent = `${b}°`;
+  }
+  for (const f of devices[0].fixes) {
+    const sMax = Math.max(...f.hypotheses.map(h => h.strength), 1e-300);
+    const seen = new Set();
+    for (const h of f.hypotheses) {
+      const b = h.bearing_deg ?? h.directions_deg[0];
+      if (seen.has(b)) continue; seen.add(b);
+      el("circle", { cx: X((f.t_first + f.t_last) / 2), cy: Y(b), r: 1.8, fill: estColor(f.estimator),
+        "fill-opacity": Math.max(0.1, h.strength / sMax) }, svg);
+    }
+  }
+  el("text", { x: x0, y: 156, "font-size": 9, fill: "var(--muted)" }, svg).textContent = "capture start";
+  el("text", { x: x1, y: 156, "font-size": 9, fill: "var(--muted)", "text-anchor": "end" }, svg).textContent = `+${fmt(span, 0)} s`;
+}
+
+function drawApSelect() {
+  const select = document.getElementById("ap");
+  const ap = currentAp();
+  select.replaceChildren();
+  for (const a of apsSeen()) {
+    const o = document.createElement("option");
+    o.value = a.id; o.textContent = `${a.id} · ${a.devices} device${a.devices === 1 ? "" : "s"}`;
+    o.selected = a.id === ap; select.appendChild(o);
+  }
+}
+function drawHeader() {
+  drawApSelect();
+  document.getElementById("session").textContent = state.meta.session ? `session ${state.meta.session}` : "";
+  document.getElementById("latest").textContent = state.latestT != null ?
+    `newest data ${new Date(state.latestT * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC · ${state.devices.size} devices` : "no fixes yet";
+  for (const b of document.querySelectorAll("[data-view]"))
+    b.setAttribute("aria-pressed", b.dataset.view === state.view);
+  const est = document.getElementById("est");
+  const counts = {};
+  for (const d of visibleDevices()) for (const f of d.fixes) counts[f.estimator] = (counts[f.estimator] || 0) + 1;
+  let names = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  let nSeg = 0;
+  for (const d of visibleDevices()) nSeg += d.segments ? d.segments.size : 0;
+  if (nSeg) { names = ["reconciled"].concat(names); counts.reconciled = nSeg; }
+  if (!state.estChosen || !names.concat(["all"]).includes(state.est)) state.est = names[0] || "all";
+  est.replaceChildren();
+  for (const n of names.concat(["all"])) {
+    const o = document.createElement("option");
+    o.value = n; o.textContent = n === "all" ? "all estimators" :
+      n === "reconciled" ? `reconciled (${counts[n]} segments)` : `${n} (${counts[n]})`;
+    o.selected = n === state.est; est.appendChild(o);
+  }
+  document.getElementById("est-label").hidden = !(state.view === "track" || state.view === "bearing");
+  for (const b of document.querySelectorAll("#scene-group button")) {
+    b.setAttribute("aria-pressed", b.dataset.scene === state.scene);
+    b.disabled = !(state.view === "anchor" || state.view === "track");
+  }
+}
+
+function drawAll() {
+  if (!state.viewChosen) state.view = hasPoints() ? "track" : "bearing";
+  drawHeader(); drawMap(); drawLegend(); drawDevices(); drawRanges(); drawHistory(); }
+
+function drawLive() {
+  const live = document.getElementById("live");
+  if (state.lastPoll == null) { live.textContent = ""; return; }
+  const since = (Date.now() - state.lastPoll) / 1000;
+  live.textContent = since < 5 ? "live" : `no contact for ${fmt(since, 0)} s`;
+  live.className = since < 5 ? "meta" : "meta warn";
+}
+
+async function poll() {
+  try {
+    const res = await fetch(`records?from=${state.offset}`, { cache: "no-store" });
+    const data = await res.json();
+    if (data.next < state.offset) { state.devices.clear(); state.latestT = state.firstT = null; }
+    state.offset = data.next;
+    data.records.forEach(ingest);
+    state.lastPoll = Date.now();
+    const seg = await (await fetch(`segments?from=${state.segOffset}`, { cache: "no-store" })).json();
+    if (seg.next < state.segOffset) for (const d of state.devices.values()) d.segments = null;
+    state.segOffset = seg.next;
+    seg.records.forEach(ingestSegment);
+    if (data.records.length || seg.records.length) drawAll();
+  } catch (e) { /* retried on the next tick; the header shows the gap */ }
+  drawLive();
+}
+
+document.getElementById("ap").onchange = e => {
+  state.ap = e.target.value; state.apChosen = true;
+  if (state.focus && state.devices.get(state.focus)?.beamformer !== state.ap) state.focus = null;
+  drawAll();
+};
+for (const b of document.querySelectorAll("[data-view]"))
+  b.onclick = () => { state.view = b.dataset.view; state.viewChosen = true; drawAll(); };
+document.getElementById("est").onchange = e => { state.est = e.target.value; state.estChosen = true; drawAll(); };
+for (const b of document.querySelectorAll("#scene-group button"))
+  b.onclick = () => { state.scene = b.dataset.scene; drawAll(); };
+document.getElementById("rot").oninput = e => {
+  state.rot = Number(e.target.value); document.getElementById("rot-v").textContent = `${state.rot}°`; drawMap();
+};
+fetch("meta").then(r => r.json()).then(m => { state.meta = m; drawHeader(); }).catch(() => {});
+drawAll();
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
