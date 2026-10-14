@@ -9,8 +9,8 @@ Segment. The smallest slice Stage 3 output for a bucket: under carry-until-
 gate, the gate-1 estimators' slice of each pass, all of them on identical
 reports. A later slice that contains segments whole (MUSIC's, gate 10, with
 its companions on the same reports) is a covering slice: each segment inside
-it is revised once, taking the covering slice's bearing and step only when
-that confidence is higher, else kept. Segments not yet covered stay
+it is revised once when that confidence is higher, else kept; CONF_REVISION
+sets what the revision takes. Segments not yet covered stay
 provisional.
 
 Correlation groups, from how aoa.py computes each estimator:
@@ -32,11 +32,13 @@ Settings, from the environment (config.env), defaults in DEFAULTS:
                          of its own estimator's strongest (3: half power).
                          Strengths are never compared across estimators
   CONF_REVISION          what a covering slice of higher confidence does:
+                         corroborate  (default) segment keeps its own
+                                      bearing(s) that lie within tolerance of
+                                      any of the covering slice's bearings
+                                      (all tied leaders, if dotted) and takes
+                                      the step; covering bearing only when
+                                      none does
                          covering     segment takes its bearing and step
-                         corroborate  segment keeps its own bearing(s) that lie
-                                      within tolerance of the covering leader
-                                      and takes the step; covering bearing only
-                                      when none does
                          off          no revision: every covered segment kept
 
 Step = number of groups supporting the leading cluster (1, 2 or 3).
@@ -64,7 +66,7 @@ DEFAULTS = {
     "CONF_GROUPS": "subspace=music,esprit;covariance_fit=spice;weighted_ls=samv2,iaa",
     "CONF_TOLERANCE_FACTOR": "0.886",
     "CONF_SUPPORT_DB": "3",
-    "CONF_REVISION": "covering",
+    "CONF_REVISION": "corroborate",
 }
 REVISION_MODES = ("covering", "corroborate", "off")
 _C_LIGHT = 299_792_458.0
