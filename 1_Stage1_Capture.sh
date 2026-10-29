@@ -23,7 +23,10 @@ echo "[*] Capture filter: ${CAPTURE_FILTER}"
 # ------------------------------------------------------------------------------
 # tcpdump flags:
 # -i  capture interface
-# -I  monitor mode (rfmon), required to see 802.11 headers without associating
+# -I  monitor mode (rfmon), required to see 802.11 headers without associating.
+#     Only passed when the interface is not already in monitor mode: libpcap
+#     refuses -I on a monitor interface ("doesn't support monitor mode"), and
+#     an interface set up beforehand already carries the channel and width.
 # -s 0  full snaplen, so V-matrix payloads are not truncated
 # -G  rotate to a new file every CHUNK_TIME seconds
 # -W 60  file cap per tcpdump run; see the restart loop below
@@ -40,9 +43,15 @@ echo "[*] Capture filter: ${CAPTURE_FILTER}"
 # and -W 60 that ends capture after 10 minutes. The loop restarts it on any
 # exit; Stage 2's watchdog does not care which process wrote a chunk.
 # ------------------------------------------------------------------------------
+RFMON_FLAG="-I"
+if iw dev "$CAPTURE_INTERFACE" info | grep -q "type monitor"; then
+    RFMON_FLAG=""
+    echo "[*] ${CAPTURE_INTERFACE} already in monitor mode; tcpdump runs without -I."
+fi
+
 echo "[*] Starting capture (auto-restarts on exit, e.g. hitting the -W file cap)."
 while true; do
-    sudo tcpdump -i "$CAPTURE_INTERFACE" -I -s 0 -G "$CHUNK_TIME" -W 60 \
+    sudo tcpdump -i "$CAPTURE_INTERFACE" $RFMON_FLAG -s 0 -G "$CHUNK_TIME" -W 60 \
         -w "$WATCH_DIR/chunk_%s.pcap" "$CAPTURE_FILTER"
     EXIT_CODE=$?
     echo "[!] tcpdump exited (code $EXIT_CODE) -- restarting in 1s." >&2
