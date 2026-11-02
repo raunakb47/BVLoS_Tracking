@@ -413,10 +413,12 @@ def ap_record(bssid, beacons, beamformers, pass_index, tag):
     the BSSID, so beamformers lists those in the log matching the BSSID or any
     transmitter address seen with it; empty means no report links to this AP.
     tx_power_dbm is the advertised ceiling from the latest frame carrying it,
-    not a measured power.
+    not a measured power. tpc_tx_power_dbm is the power the AP states it used,
+    from the latest TPC Report element, or None.
     """
     transmitters = sorted({b["transmitter"] for b in beacons})
     advertised = [b["tx_power_dbm"] for b in beacons if b.get("tx_power_dbm") is not None]
+    stated = [b["tpc_tx_power_dbm"] for b in beacons if b.get("tpc_tx_power_dbm") is not None]
     ssids = [b["ssid"] for b in beacons if b.get("ssid")]
     return {
         "kind": "ap",
@@ -431,6 +433,7 @@ def ap_record(bssid, beacons, beamformers, pass_index, tag):
         "channel": beacons[-1].get("channel"),
         "freq_mhz": beacons[-1].get("freq_mhz"),
         "tx_power_dbm": advertised[-1] if advertised else None,
+        "tpc_tx_power_dbm": stated[-1] if stated else None,
         "n_frames": len(beacons),
         "t_first": beacons[0]["t"],
         "t_last": beacons[-1]["t"],

@@ -61,6 +61,7 @@ _IE_DS_PARAMETER_SET = 3
 _IE_COUNTRY = 7
 _IE_POWER_CONSTRAINT = 32
 _IE_POWER_CAPABILITY = 33
+_IE_TPC_REPORT = 35
 
 def _import_capture_reader(wibfi_dir):
     """
@@ -124,6 +125,19 @@ def _advertised_tx_power_dbm(elements):
     if constraint:
         max_power_dbm -= float(constraint[0])
     return max_power_dbm, country_code
+
+
+def _tpc_tx_power_dbm(elements):
+    """
+    Transmit Power of a TPC Report element (signed dBm, the power used to send
+    the frame carrying it, within +/-5 dB of its EIRP), else None. For a
+    non-HT duplicate PPDU the standard leaves open whether the value is per
+    20 MHz or for the whole PPDU (IEEE 802.11-25/1508).
+    """
+    report = elements.get(_IE_TPC_REPORT)
+    if not report or len(report) < 2:
+        return None
+    return float(struct.unpack("b", report[0:1])[0])
 
 
 def _power_capability(frame, subtype, capture_reader, buf, timestamp):
@@ -220,6 +234,7 @@ def scan_chunk(path, capture_reader):
             # wavelength ranging on this frame depends on.
             "freq_mhz": capture_reader.radiotap_channel_mhz(buf),
             "tx_power_dbm": tx_power_dbm,
+            "tpc_tx_power_dbm": _tpc_tx_power_dbm(elements),
             "country": country_code,
             "rssi": signal_chains[0] if signal_chains else None,
             "chains": signal_chains,

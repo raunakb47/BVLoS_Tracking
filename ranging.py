@@ -4,20 +4,27 @@ Module: ranging.py
 Stage 4. Distance from the monitor to a transmitter, from received power,
 under a published site-general path-loss model.
 
-Model (ITU-R P.1238-13 eq. 1 indoor; P.1411-13 eq. 1 outdoor, same form):
+Model (ITU-R P.1238-13 eq. 1 indoor; P.1411-13 eq. 1 outdoor; 3GPP TR 38.901
+Table 7.4.1-1 InH-Office, same form):
 
     L(d, f) = 10 alpha log10(d) + beta + 10 gamma log10(f_GHz) + X,  X ~ N(0, sigma)
 
 with d the 3D distance in metres. alpha, beta, gamma and sigma are fitted per
 environment and per LoS/NLoS, and each fit holds over a stated distance and
 frequency range (MODELS). PATH_LOSS_MODEL in config.env picks the row.
+The 38.901 NLoS loss is max(LoS, NLoS') (LOS_FLOOR), so its inverse is the
+nearer of the two rows' distances.
 
 Observed loss is L = P_tx - RSSI. Inverting the median gives median_m; the
 band [near_m, far_m] is the median inverted at L -/+ k sigma (RANGE_SIGMA_K).
 A distance outside the model's range is not extrapolated: it is reported as
 None, and "outside" says on which side the median fell.
 
-P_tx comes from data, first source found (tx_power()):
+P_tx of an AP ranging itself (ap_range()) is first the power its own Beacon
+or Probe Response states in a TPC Report element: the power used for that
+frame, within +/-5 dB of its EIRP (IEEE 802.11 TPC Report element). Without
+one, and for every client, P_tx comes from data, first source found
+(tx_power()):
   1. the client's own Power Capability element (Association Request), the
      most it can transmit (Stage 3 fact tx_power_capability_dbm)
   2. the Country element of its AP (Beacon, Probe Response)
@@ -49,7 +56,14 @@ MODELS = {
     "urban_highrise_nlos": ("P.1411-13", 3.73, 16.02, 2.26, 7.62, (0.8, 159.0), (20, 715)),
     "suburban_nlos":      ("P.1411-13", 4.52, 6.04, 2.14, 8.02, (0.45, 255.0), (10, 250)),
     "residential_nlos":   ("P.1411-13", 3.01, 18.8, 2.07, 3.07, (0.8, 73.0), (30, 170)),
+    # 3GPP TR 38.901 V16.1.0 (ETSI TR 138 901, 2020-11) Table 7.4.1-1, InH-Office:
+    # LoS 32.4 + 17.3 log10(d) + 20 log10(f); NLoS' 17.30 + 38.3 log10(d) + 24.9 log10(f).
+    "office_38901_los":   ("TR 38.901", 1.73, 32.4, 2.0, 3.0, (0.5, 100.0), (1, 150)),
+    "office_38901_nlos":  ("TR 38.901", 3.83, 17.30, 2.49, 8.03, (0.5, 100.0), (1, 150)),
 }
+
+# NLoS rows whose loss is never below a LoS row's: PL = max(PL_LoS, PL_NLoS').
+LOS_FLOOR = {"office_38901_nlos": "office_38901_los"}
 
 # 802.11 band edges, MHz. A Country element heard in one band says nothing
 # about another's limits.
@@ -152,6 +166,15 @@ def distance_for_loss_m(loss_db, freq_mhz, model):
     return float(10.0 ** exponent)
 
 
+def _distance_m(loss_db, freq_mhz, model_name):
+    """distance_for_loss_m under MODELS[model_name], with its LOS_FLOOR if any."""
+    d = distance_for_loss_m(loss_db, freq_mhz, MODELS[model_name])
+    floor = LOS_FLOOR.get(model_name)
+    if floor is not None:
+        d = min(d, distance_for_loss_m(loss_db, freq_mhz, MODELS[floor]))
+    return d
+
+
 def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
     """
     Range from one reading under MODELS[model_name]: median_m and the band
@@ -177,10 +200,10 @@ def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
     def within(d):
         return d if d_low <= d <= d_high else None
 
-    median = distance_for_loss_m(loss, freq_mhz, model)
+    median = _distance_m(loss, freq_mhz, model_name)
     result["median_m"] = within(median)
-    result["near_m"] = within(distance_for_loss_m(loss - k * sigma, freq_mhz, model))
-    result["far_m"] = within(distance_for_loss_m(loss + k * sigma, freq_mhz, model))
+    result["near_m"] = within(_distance_m(loss - k * sigma, freq_mhz, model_name))
+    result["far_m"] = within(_distance_m(loss + k * sigma, freq_mhz, model_name))
     if median < d_low:
         result["outside"] = "below"
     elif median > d_high:
@@ -202,6 +225,10 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
     """Range of a Stage 3 "ap" record's AP from the monitor, with its power source."""
     summary = ap_record.get("rssi")
     freq = ap_record.get("freq_mhz")
+    if ap_record.get("tpc_tx_power_dbm") is not None:
+        power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
+        return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
+                    power_dbm=power, power_source=source)
     power, source = power_ceiling(freq, ap_record["bssid"],
                                   [dict(ap_record, beamformers=[ap_record["bssid"]])]
                                   + list(ap_records), regdomain)
