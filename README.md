@@ -11,7 +11,7 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
 * **Per-packet decode.** Standard, Nc, Nr, width, codebook and grouping come from each frame's MIMO Control field, so one capture covers 2x1 to 4x4, Wi-Fi 5 and 6, without configuration. Reports are bucketed by `{transmitter}_{beamformer}_{Nr}x{Nc}@{bw}`.
 * **Append-only logs as the only state.** Each stage writes once and resumes after the last line it processed.
 * **Capability-gated estimators.** MUSIC, SPICE, SAMV-2 and IAA on the BFI covariance (Itahara et al., IEEE Access 2022). Each declares its requirements; Stage 3 records whether it ran and why. Each solves its new reports once they meet its gate, and the others run on the same slice for comparison.
-* **Ranging from published models.** RSSI to a distance band via ITU-R P.1238-13 / P.1411-13 (NLoS office by default, ±kσ). Out-of-range readings are flagged, not extrapolated. Transmit power is a stated maximum from the client's Power Capability, the Country element or the host's regulatory domain.
+* **Ranging from published models.** RSSI to a distance band via ITU-R P.1238-13 / P.1411-13 or 3GPP TR 38.901 InH-Office (NLoS office by default, ±kσ). Out-of-range readings are flagged, not extrapolated. An AP ranging itself uses the power its TPC Report element states when it sends one. Otherwise transmit power is a stated maximum from the client's Power Capability, the Country element or the host's regulatory domain.
 * **Geometry from measured angles only.** Without an anchor, bearings stay in the AP's array frame. With the monitor host's associated interface as anchor (`ANCHOR_MAC`), positions are the bearing ray crossing the RSSI ring around the monitor. No world orientation is assumed; both mirror scenes are kept.
 * **Confidence reconciliation.** Each track segment is graded by how many independent estimator groups agree on one direction (1 red, 2 amber, 3 green; dotted on a tie) and revised at most once by a longer covering slice. All rules are set in `config.env`.
 * **Live view.** Local web page: trajectory, bearing track, rays and AP array frame, with range bands and bearing history.
@@ -83,7 +83,7 @@ Each setting is documented in the file with its basis. The main ones:
 |---|---|
 | `CAPTURE_INTERFACE`, `CHUNK_TIME` | monitor-mode interface and rotation period in seconds |
 | `LIVE_ESTIMATORS`, `MIN_REPORTS_<NAME>` | estimators on the live path and each one's report-count gate |
-| `PATH_LOSS_MODEL`, `RANGE_SIGMA_K` | ITU-R model row (default `office_nlos`) and range band width in σ |
+| `PATH_LOSS_MODEL`, `RANGE_SIGMA_K` | ITU-R or 3GPP model row (default `office_nlos`) and range band width in σ |
 | `ANCHOR_MAC` | MAC of the monitor host's own associated interface; empty for no anchor |
 | `CONF_GROUPS`, `CONF_TOLERANCE_FACTOR`, `CONF_SUPPORT_DB`, `CONF_REVISION` | confidence reconciliation |
 | `RENDER_PORT` | port of the live view; empty to not start it |

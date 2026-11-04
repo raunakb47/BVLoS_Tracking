@@ -60,7 +60,9 @@ _IE_SSID = 0
 _IE_DS_PARAMETER_SET = 3
 _IE_COUNTRY = 7
 _IE_POWER_CONSTRAINT = 32
+_IE_HT_OPERATION = 61
 _IE_POWER_CAPABILITY = 33
+_IE_TPC_REPORT = 35
 
 def _import_capture_reader(wibfi_dir):
     """
@@ -96,7 +98,30 @@ def _information_elements(frame, start=_IE_START):
     return elements
 
 
-def _advertised_tx_power_dbm(elements):
+def _operating_channel(elements, freq_mhz):
+    """Primary channel number: HT Operation, else DS Parameter Set, else from freq_mhz."""
+    ht_operation = elements.get(_IE_HT_OPERATION)
+    if ht_operation:
+        return int(ht_operation[0])
+    ds = elements.get(_IE_DS_PARAMETER_SET)
+    if ds:
+        return int(ds[0])
+    if freq_mhz is None:
+        return None
+    if 2412 <= freq_mhz <= 2472:
+        return int(round((freq_mhz - 2407) / 5))
+    if 5000 <= freq_mhz <= 5900:
+        return int(round((freq_mhz - 5000) / 5))
+    return None
+
+
+def _subband_channels(first, count):
+    """Channels of a Country subband triplet: spacing 1 in 2.4 GHz (first <= 14), else 4."""
+    step = 1 if first <= 14 else 4
+    return range(first, first + step * count, step)
+
+
+def _advertised_tx_power_dbm(elements, freq_mhz=None):
     """
     Advertised transmit ceiling as Country maximum - Power Constraint, per
     802.11 Local Maximum Transmit Power. Returns (dbm, country_code), either
@@ -105,8 +130,10 @@ def _advertised_tx_power_dbm(elements):
     The Country element holds a 3-byte country string then 3-byte triplets:
     (first channel, channel count, max power in signed dBm) or, with a first
     byte of 201 or more, an operating-extension triplet carrying no power.
-    The highest subband maximum is taken, so the result bounds every channel
-    the element lists without deciding which one is in use.
+    The subband that lists the AP's operating channel gives the maximum
+    (primary channel from HT Operation, else DS Parameter Set, else the
+    capture frequency). When no subband lists that channel, the highest
+    subband maximum is taken, which bounds every channel the element lists.
 
     A regulatory ceiling, not an instantaneous measurement: an AP running
     802.11h transmit power control sits below it with no further signalling.
@@ -115,15 +142,31 @@ def _advertised_tx_power_dbm(elements):
     if country is None or len(country) < 6:
         return None, None
     country_code = country[:2].decode("ascii", errors="replace")
-    limits = [struct.unpack("b", country[i + 2:i + 3])[0]
-              for i in range(3, len(country) - 2, 3) if country[i] < 201]
-    if not limits:
+    triplets = [(country[i], country[i + 1], struct.unpack("b", country[i + 2:i + 3])[0])
+                for i in range(3, len(country) - 2, 3) if country[i] < 201]
+    if not triplets:
         return None, country_code
-    max_power_dbm = float(max(limits))
+    channel = _operating_channel(elements, freq_mhz)
+    covering = [power for first, count, power in triplets
+                if channel is not None and channel in _subband_channels(first, count)]
+    max_power_dbm = float(max(covering or [power for _, _, power in triplets]))
     constraint = elements.get(_IE_POWER_CONSTRAINT)
     if constraint:
         max_power_dbm -= float(constraint[0])
     return max_power_dbm, country_code
+
+
+def _tpc_tx_power_dbm(elements):
+    """
+    Transmit Power of a TPC Report element (signed dBm, the power used to send
+    the frame carrying it, within +/-5 dB of its EIRP), else None. For a
+    non-HT duplicate PPDU the standard leaves open whether the value is per
+    20 MHz or for the whole PPDU (IEEE 802.11-25/1508).
+    """
+    report = elements.get(_IE_TPC_REPORT)
+    if not report or len(report) < 2:
+        return None
+    return float(struct.unpack("b", report[0:1])[0])
 
 
 def _power_capability(frame, subtype, capture_reader, buf, timestamp):
@@ -202,7 +245,8 @@ def scan_chunk(path, capture_reader):
         elements = _information_elements(frame)
         ssid_bytes = elements.get(_IE_SSID)
         channel = elements.get(_IE_DS_PARAMETER_SET)
-        tx_power_dbm, country_code = _advertised_tx_power_dbm(elements)
+        freq_mhz = capture_reader.radiotap_channel_mhz(buf)
+        tx_power_dbm, country_code = _advertised_tx_power_dbm(elements, freq_mhz)
         signal_chains = [float(v) for v in capture_reader.radiotap_signal_dbm(buf)]
 
         beacons.append({
@@ -218,8 +262,9 @@ def scan_chunk(path, capture_reader):
             "channel": int(channel[0]) if channel else None,
             # Monitor's tuned frequency, as on bfi records; sets the
             # wavelength ranging on this frame depends on.
-            "freq_mhz": capture_reader.radiotap_channel_mhz(buf),
+            "freq_mhz": freq_mhz,
             "tx_power_dbm": tx_power_dbm,
+            "tpc_tx_power_dbm": _tpc_tx_power_dbm(elements),
             "country": country_code,
             "rssi": signal_chains[0] if signal_chains else None,
             "chains": signal_chains,
