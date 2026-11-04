@@ -34,6 +34,16 @@ Every source is a maximum; a transmitter below it is nearer than reported.
 The source is carried with every range. Absent all four there is no range.
 
 Antenna gains are folded into P_tx: the limits are EIRP.
+
+Site input (config.env), used ahead of the above when set:
+  SITE_RSSI_1M_DBM, SITE_PL_N, SITE_SIGMA_DB, SITE_VALID_M
+      a fit of the monitor's RSSI against tape-measured distance for a
+      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). A client is
+      ranged with it, which assumes the client's effective power equals the
+      calibration transmitter's. Only distances inside SITE_VALID_M are given.
+  AP_DISTANCE_M
+      measured distance from the monitor to each AP, "bssid=metres;...". An
+      AP listed there takes that distance; any other AP is ranged by model.
 """
 import os
 import re
@@ -214,6 +224,9 @@ def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
 def client_range(output, facts, ap_records, regdomain, model_name, k):
     """Range of a Stage 3 output's client from the monitor, with its power source."""
     summary = output.get("client_rssi")
+    fit = site_fit()
+    if fit is not None:
+        return site_estimate(summary and summary["median_dbm"], fit, k)
     freq = facts.get("centre_freq_mhz")
     power, source = tx_power(freq, facts["beamformer"], ap_records, regdomain,
                              facts.get("tx_power_capability_dbm"))
@@ -225,6 +238,12 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
     """Range of a Stage 3 "ap" record's AP from the monitor, with its power source."""
     summary = ap_record.get("rssi")
     freq = ap_record.get("freq_mhz")
+    measured = measured_ap_distances().get(ap_record["bssid"].lower())
+    if measured is not None:
+        return {"model": "measured", "recommendation": "site input", "valid_m": None,
+                "sigma_db": None, "k": k, "loss_db": None, "median_m": measured,
+                "near_m": measured, "far_m": measured, "outside": None,
+                "power_dbm": None, "power_source": "site_input"}
     if ap_record.get("tpc_tx_power_dbm") is not None:
         power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
         return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
@@ -234,3 +253,70 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
                                   + list(ap_records), regdomain)
     return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
                 power_dbm=power, power_source=source)
+
+
+def _float_env(environ, key):
+    value = (environ.get(key) or "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(f"{key}={value!r} is not a number") from None
+
+
+def site_fit(environ=None):
+    """The calibration fit from SITE_* in config.env, or None when unset."""
+    environ = os.environ if environ is None else environ
+    rssi_1m, n = _float_env(environ, "SITE_RSSI_1M_DBM"), _float_env(environ, "SITE_PL_N")
+    if rssi_1m is None or n is None:
+        return None
+    if n <= 0:
+        raise ValueError(f"SITE_PL_N={n} must be positive")
+    sigma = _float_env(environ, "SITE_SIGMA_DB") or 0.0
+    valid = (environ.get("SITE_VALID_M") or "").strip()
+    try:
+        low, high = (float(v) for v in valid.split("-")) if valid else (0.0, float("inf"))
+    except ValueError:
+        raise ValueError(f"SITE_VALID_M={valid!r} is not 'low-high' in metres") from None
+    return {"rssi_1m_dbm": rssi_1m, "n": n, "sigma_db": sigma, "valid_m": [low, high]}
+
+
+def site_estimate(rssi_dbm, fit, k):
+    """Range from one reading under the site fit, in estimate()'s form."""
+    low, high = fit["valid_m"]
+    result = {"model": "site_fit", "recommendation": "site calibration",
+              "valid_m": [low, high], "sigma_db": fit["sigma_db"], "k": k,
+              "loss_db": None, "median_m": None, "near_m": None, "far_m": None,
+              "outside": None, "power_dbm": None, "power_source": "site_fit"}
+    if rssi_dbm is None:
+        return result
+
+    def distance(rssi):
+        return float(10.0 ** ((fit["rssi_1m_dbm"] - rssi) / (10.0 * fit["n"])))
+
+    def within(d):
+        return d if low <= d <= high else None
+
+    median = distance(rssi_dbm)
+    result["median_m"] = within(median)
+    result["near_m"] = within(distance(rssi_dbm + k * fit["sigma_db"]))
+    result["far_m"] = within(distance(rssi_dbm - k * fit["sigma_db"]))
+    if median < low:
+        result["outside"] = "below"
+    elif median > high:
+        result["outside"] = "above"
+    return result
+
+
+def measured_ap_distances(environ=None):
+    """{bssid: metres} from AP_DISTANCE_M ("bssid=metres;...")."""
+    environ = os.environ if environ is None else environ
+    distances = {}
+    for part in filter(None, (p.strip() for p in (environ.get("AP_DISTANCE_M") or "").split(";"))):
+        bssid, _, metres = part.partition("=")
+        try:
+            distances[bssid.strip().lower()] = float(metres)
+        except ValueError:
+            raise ValueError(f"AP_DISTANCE_M entry {part!r} is not bssid=metres") from None
+    return distances
