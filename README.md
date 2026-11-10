@@ -85,7 +85,7 @@ Each setting is documented in the file with its basis. The main ones:
 | `LIVE_ESTIMATORS`, `MIN_REPORTS_<NAME>` | estimators on the live path and each one's report-count gate |
 | `PATH_LOSS_MODEL`, `RANGE_SIGMA_K` | ITU-R or 3GPP model row (default `office_nlos`) and range band width in σ |
 | `ANCHOR_MAC` | MAC of the monitor host's own associated interface; empty for no anchor |
-| `CONF_GROUPS`, `CONF_TOLERANCE_FACTOR`, `CONF_SUPPORT_DB`, `CONF_REVISION` | confidence reconciliation |
+| `CONF_GROUPS`, `CONF_TOLERANCE_FACTOR`, `CONF_SUPPORT_DB`, `CONF_REVISION`, `CONF_REVISION_WHEN` | confidence reconciliation |
 | `RENDER_PORT` | port of the live view; empty to not start it |
 
 Standard, MIMO configuration and channel width are decoded per packet, so they
