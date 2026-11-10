@@ -40,6 +40,14 @@ Settings, from the environment (config.env), defaults in DEFAULTS:
                                       none does
                          covering     segment takes its bearing and step
                          off          no revision: every covered segment kept
+  CONF_REVISION_WHEN     when a covering slice may revise at all:
+                         static  (default) only when the segments it
+                                 contains agree on their own leading
+                                 bearings within tolerance, i.e. the client
+                                 looks static over the covering slice; a
+                                 longer slice blurs a moving client's bearing,
+                                 so the segments of a moving client are kept
+                         always  every covering slice of higher confidence
 
 Step = number of groups supporting the leading cluster (1, 2 or 3).
 Dotted = another cluster ties the leader, so no one direction is backed.
@@ -67,8 +75,10 @@ DEFAULTS = {
     "CONF_TOLERANCE_FACTOR": "0.886",
     "CONF_SUPPORT_DB": "3",
     "CONF_REVISION": "corroborate",
+    "CONF_REVISION_WHEN": "static",
 }
 REVISION_MODES = ("covering", "corroborate", "off")
+REVISION_WHEN = ("static", "always")
 _C_LIGHT = 299_792_458.0
 
 
@@ -92,11 +102,14 @@ def settings_from_env(environ):
     revision = get("CONF_REVISION")
     if revision not in REVISION_MODES:
         raise ValueError(f"CONF_REVISION must be one of {REVISION_MODES}, not {revision!r}")
+    when = get("CONF_REVISION_WHEN")
+    if when not in REVISION_WHEN:
+        raise ValueError(f"CONF_REVISION_WHEN must be one of {REVISION_WHEN}, not {when!r}")
     factor, support_db = float(get("CONF_TOLERANCE_FACTOR")), float(get("CONF_SUPPORT_DB"))
     if factor <= 0 or support_db < 0:
         raise ValueError("CONF_TOLERANCE_FACTOR must be > 0 and CONF_SUPPORT_DB >= 0")
     return {"groups": parse_groups(get("CONF_GROUPS")), "tolerance_factor": factor,
-            "support_db": support_db, "revision": revision}
+            "support_db": support_db, "revision": revision, "revision_when": when}
 
 
 SETTINGS = settings_from_env({})
@@ -214,6 +227,19 @@ def revise(own, covering, mode):
     return dict(covering, bearings_from="covering"), "revised"
 
 
+def looks_static(inside, tolerance):
+    """
+    True when the segments a covering slice contains agree on their own
+    leading bearings within tolerance in u = sin(theta). A single segment (or
+    none with a bearing) gives no sign of movement and counts as static.
+    """
+    if tolerance is None:
+        return False
+    u = [float(np.sin(np.radians(s["assessment"]["bearings_deg"][0])))
+         for s in inside if s["assessment"]["bearings_deg"]]
+    return len(u) < 2 or max(u) - min(u) <= tolerance
+
+
 def _live(entry):
     """Estimators live for this bucket: every result not refused as absent from the live set."""
     return {r["estimator"] for r in entry["results"]
@@ -319,10 +345,12 @@ def segments(solve_path, start_line, anchor_mac, regdomain, model_name, k,
                           and s["base"]["t_last"] <= slice_["t_last"]]
                 if inside:
                     covering = dict(slice_, step=assessment["step"], dotted=assessment["dotted"])
+                    mode = settings["revision"]
+                    if settings["revision_when"] == "static" and not looks_static(inside, tolerance):
+                        mode = "off"
                     for segment in inside:
                         pending.remove(segment)
-                        revised, state = revise(segment["assessment"], assessment,
-                                                settings["revision"])
+                        revised, state = revise(segment["assessment"], assessment, mode)
                         if state == "revised":
                             segment["assessment"] = revised
                             segment["assessed_on"] = slice_["slice_id"]
@@ -380,7 +408,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("usage: confidence.py <solve.jsonl> <session_dir>\n"
               "  env: ANCHOR_MAC, PATH_LOSS_MODEL, RANGE_SIGMA_K, CONF_GROUPS,\n"
-              "       CONF_TOLERANCE_FACTOR, CONF_SUPPORT_DB, CONF_REVISION", file=sys.stderr)
+              "       CONF_TOLERANCE_FACTOR, CONF_SUPPORT_DB, CONF_REVISION,\n"
+              "       CONF_REVISION_WHEN", file=sys.stderr)
         raise SystemExit(2)
     path, count = reconcile(sys.argv[1], sys.argv[2])
     print(f"[stage4] {count} segment records -> {path}")
