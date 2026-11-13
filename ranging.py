@@ -35,15 +35,16 @@ The source is carried with every range. Absent all four there is no range.
 
 Antenna gains are folded into P_tx: the limits are EIRP.
 
-Site input (config.env), used ahead of the above when set:
+Distance model fit (config.env, the default), used ahead of the above when set:
   SITE_RSSI_1M_DBM, SITE_PL_N, SITE_SIGMA_DB, SITE_VALID_M
       a fit of the monitor's RSSI against tape-measured distance for a
-      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). A client is
-      ranged with it, which assumes the client's effective power equals the
-      calibration transmitter's. Only distances inside SITE_VALID_M are given.
+      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). Every
+      transmitter, client or AP, is ranged with it, which assumes its
+      effective power equals the calibration transmitter's. Only distances
+      inside SITE_VALID_M are given. SITE_FIT_NAME labels the fit.
   AP_DISTANCE_M
       measured distance from the monitor to each AP, "bssid=metres;...". An
-      AP listed there takes that distance; any other AP is ranged by model.
+      AP listed there takes that distance.
 """
 import os
 import re
@@ -244,6 +245,9 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
                 "sigma_db": None, "k": k, "loss_db": None, "median_m": measured,
                 "near_m": measured, "far_m": measured, "outside": None,
                 "power_dbm": None, "power_source": "site_input"}
+    fit = site_fit()
+    if fit is not None:
+        return site_estimate(summary and summary["median_dbm"], fit, k)
     if ap_record.get("tpc_tx_power_dbm") is not None:
         power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
         return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
@@ -279,13 +283,14 @@ def site_fit(environ=None):
         low, high = (float(v) for v in valid.split("-")) if valid else (0.0, float("inf"))
     except ValueError:
         raise ValueError(f"SITE_VALID_M={valid!r} is not 'low-high' in metres") from None
-    return {"rssi_1m_dbm": rssi_1m, "n": n, "sigma_db": sigma, "valid_m": [low, high]}
+    name = (environ.get("SITE_FIT_NAME") or "").strip() or "site_fit"
+    return {"name": name, "rssi_1m_dbm": rssi_1m, "n": n, "sigma_db": sigma, "valid_m": [low, high]}
 
 
 def site_estimate(rssi_dbm, fit, k):
     """Range from one reading under the site fit, in estimate()'s form."""
     low, high = fit["valid_m"]
-    result = {"model": "site_fit", "recommendation": "site calibration",
+    result = {"model": fit.get("name", "site_fit"), "recommendation": "site calibration",
               "valid_m": [low, high], "sigma_db": fit["sigma_db"], "k": k,
               "loss_db": None, "median_m": None, "near_m": None, "far_m": None,
               "outside": None, "power_dbm": None, "power_source": "site_fit"}
