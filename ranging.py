@@ -11,7 +11,8 @@ Table 7.4.1-1 InH-Office, same form):
 
 with d the 3D distance in metres. alpha, beta, gamma and sigma are fitted per
 environment and per LoS/NLoS, and each fit holds over a stated distance and
-frequency range (MODELS). PATH_LOSS_MODEL in config.env picks the row.
+frequency range (MODELS). PATH_LOSS_MODEL in config.env picks one row of
+MODELS or one fit of PATH_LOSS_FITS.
 The 38.901 NLoS loss is max(LoS, NLoS') (LOS_FLOOR), so its inverse is the
 nearer of the two rows' distances.
 
@@ -35,15 +36,16 @@ The source is carried with every range. Absent all four there is no range.
 
 Antenna gains are folded into P_tx: the limits are EIRP.
 
-Site input (config.env), used ahead of the above when set:
-  SITE_RSSI_1M_DBM, SITE_PL_N, SITE_SIGMA_DB, SITE_VALID_M
-      a fit of the monitor's RSSI against tape-measured distance for a
-      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). A client is
-      ranged with it, which assumes the client's effective power equals the
-      calibration transmitter's. Only distances inside SITE_VALID_M are given.
+Measured fits (config.env PATH_LOSS_FITS):
+  "name: RSSI_1m n sigma low-high; ..." declares fits of the monitor's RSSI
+  against tape-measured distance for a calibration transmitter,
+  RSSI = RSSI_1m - 10 n log10(d), with residual spread sigma (dB) and the
+  span low-high (m) in which the fit is applied. When PATH_LOSS_MODEL names a
+  fit, every transmitter, client or AP, is ranged with it. That assumes its
+  effective power equals the calibration transmitter's, so no P_tx is needed.
   AP_DISTANCE_M
       measured distance from the monitor to each AP, "bssid=metres;...". An
-      AP listed there takes that distance; any other AP is ranged by model.
+      AP listed there takes that distance.
 """
 import os
 import re
@@ -84,11 +86,18 @@ _RULE = re.compile(r"\(\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*@[^)]*\),\s*"
 
 
 def model_from_env(environ=None):
-    """(name, coefficients) for PATH_LOSS_MODEL; raises on an unknown name."""
+    """
+    (name, definition) for PATH_LOSS_MODEL: a MODELS row, or a fit dict from
+    PATH_LOSS_FITS. Raises on an unknown name.
+    """
     environ = os.environ if environ is None else environ
     name = environ.get("PATH_LOSS_MODEL")
+    fits = fits_from_env(environ)
+    if name in fits:
+        return name, fits[name]
     if name not in MODELS:
-        raise ValueError(f"PATH_LOSS_MODEL={name!r} is not one of {sorted(MODELS)}")
+        raise ValueError(f"PATH_LOSS_MODEL={name!r} is not one of "
+                         f"{sorted(MODELS) + sorted(fits)}")
     return name, MODELS[name]
 
 
@@ -224,9 +233,9 @@ def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
 def client_range(output, facts, ap_records, regdomain, model_name, k):
     """Range of a Stage 3 output's client from the monitor, with its power source."""
     summary = output.get("client_rssi")
-    fit = site_fit()
+    fit = selected_fit()
     if fit is not None:
-        return site_estimate(summary and summary["median_dbm"], fit, k)
+        return fit_estimate(summary and summary["median_dbm"], fit, k)
     freq = facts.get("centre_freq_mhz")
     power, source = tx_power(freq, facts["beamformer"], ap_records, regdomain,
                              facts.get("tx_power_capability_dbm"))
@@ -244,6 +253,9 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
                 "sigma_db": None, "k": k, "loss_db": None, "median_m": measured,
                 "near_m": measured, "far_m": measured, "outside": None,
                 "power_dbm": None, "power_source": "site_input"}
+    fit = selected_fit()
+    if fit is not None:
+        return fit_estimate(summary and summary["median_dbm"], fit, k)
     if ap_record.get("tpc_tx_power_dbm") is not None:
         power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
         return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
@@ -265,30 +277,42 @@ def _float_env(environ, key):
         raise ValueError(f"{key}={value!r} is not a number") from None
 
 
-def site_fit(environ=None):
-    """The calibration fit from SITE_* in config.env, or None when unset."""
+def fits_from_env(environ=None):
+    """{name: fit} from PATH_LOSS_FITS ("name: RSSI_1m n sigma low-high; ...")."""
     environ = os.environ if environ is None else environ
-    rssi_1m, n = _float_env(environ, "SITE_RSSI_1M_DBM"), _float_env(environ, "SITE_PL_N")
-    if rssi_1m is None or n is None:
-        return None
-    if n <= 0:
-        raise ValueError(f"SITE_PL_N={n} must be positive")
-    sigma = _float_env(environ, "SITE_SIGMA_DB") or 0.0
-    valid = (environ.get("SITE_VALID_M") or "").strip()
-    try:
-        low, high = (float(v) for v in valid.split("-")) if valid else (0.0, float("inf"))
-    except ValueError:
-        raise ValueError(f"SITE_VALID_M={valid!r} is not 'low-high' in metres") from None
-    return {"rssi_1m_dbm": rssi_1m, "n": n, "sigma_db": sigma, "valid_m": [low, high]}
+    fits = {}
+    for part in filter(None, (p.strip() for p in (environ.get("PATH_LOSS_FITS") or "").split(";"))):
+        name, _, values = part.partition(":")
+        name = name.strip()
+        try:
+            rssi_1m, n, sigma, span = values.split()
+            low, high = (float(v) for v in span.split("-"))
+            fit = {"name": name, "rssi_1m_dbm": float(rssi_1m), "n": float(n),
+                   "sigma_db": float(sigma), "valid_m": [low, high]}
+        except ValueError:
+            raise ValueError(f"PATH_LOSS_FITS entry {part!r} is not "
+                             "'name: RSSI_1m n sigma low-high'") from None
+        if name in MODELS:
+            raise ValueError(f"PATH_LOSS_FITS name {name!r} is a published model's name")
+        if fit["n"] <= 0:
+            raise ValueError(f"PATH_LOSS_FITS {name!r}: n must be positive")
+        fits[name] = fit
+    return fits
 
 
-def site_estimate(rssi_dbm, fit, k):
+def selected_fit(environ=None):
+    """The fit PATH_LOSS_MODEL names, or None when it names a published model."""
+    environ = os.environ if environ is None else environ
+    return fits_from_env(environ).get(environ.get("PATH_LOSS_MODEL"))
+
+
+def fit_estimate(rssi_dbm, fit, k):
     """Range from one reading under the site fit, in estimate()'s form."""
     low, high = fit["valid_m"]
-    result = {"model": "site_fit", "recommendation": "site calibration",
+    result = {"model": fit["name"], "recommendation": "measured fit",
               "valid_m": [low, high], "sigma_db": fit["sigma_db"], "k": k,
               "loss_db": None, "median_m": None, "near_m": None, "far_m": None,
-              "outside": None, "power_dbm": None, "power_source": "site_fit"}
+              "outside": None, "power_dbm": None, "power_source": "fit"}
     if rssi_dbm is None:
         return result
 
