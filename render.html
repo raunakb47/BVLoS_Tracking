@@ -640,7 +640,7 @@ function drawRanges() {
     el("text", { x: 0, y: y + 4, "font-size": 10, fill: row.ap ? "var(--mon)" : "var(--ink)",
       class: "mono" }, svg).textContent = row.label;
     el("line", { x1: x0, y1: y, x2: x1, y2: y, stroke: "var(--grid)" }, svg);
-    if (b.valid_m) el("line", { x1: X(b.valid_m[0]), y1: y + 6, x2: X(b.valid_m[1]), y2: y + 6,
+    if (b.valid_m) el("line", { x1: X(b.valid_m[0]), y1: y + 6, x2: X(b.valid_m[1] ?? max), y2: y + 6,
       stroke: "var(--line)", "stroke-width": 2 }, svg);
     if (b.near_m == null && b.median_m == null && b.far_m == null) {
       el("text", { x: x0 + 4, y: y + 4, "font-size": 9, fill: "var(--muted)" }, svg).textContent =
@@ -650,7 +650,7 @@ function drawRanges() {
         b.power_source == null && b.loss_db == null ? "no transmit power known" : "no range";
       return;
     }
-    const lo = b.near_m ?? (b.valid_m ? b.valid_m[0] : 0), hi = b.far_m ?? (b.valid_m ? b.valid_m[1] : max);
+    const lo = b.near_m ?? (b.valid_m ? b.valid_m[0] : 0), hi = b.far_m ?? (b.valid_m ? b.valid_m[1] ?? max : max);
     el("line", { x1: X(lo), y1: y, x2: X(hi), y2: y, stroke: row.ap ? "var(--mon)" : "var(--ink)",
       "stroke-width": 4, "stroke-opacity": 0.35 }, svg);
     if (b.far_m == null) el("text", { x: X(hi) + 2, y: y + 3, "font-size": 9, fill: "var(--muted)" }, svg).textContent = "›";
@@ -667,6 +667,8 @@ function drawRanges() {
     ? `distance model fit ${band.model}, assumes it transmits like the calibration device.` : `${band.model} (${band.recommendation}), power ${band.power_source ?? "none"}.`)).join(" ");
   const clientNote = !any ? "" : any.power_source === "fit"
     ? `Clients: distance model fit ${any.model}, band ±${any.k}σ with σ = ${any.sigma_db} dB, assumes each client transmits like the calibration device. `
+    : any.power_source === "monitor_check"
+    ? `Clients: model ${any.model} (${any.recommendation}), band ±${any.k}σ with σ = ${any.sigma_db} dB, power ${fmt(any.power_dbm, 1)} dBm from the monitor check, assumes each client transmits like the check transmitter. `
     : `Clients: model ${any.model} (${any.recommendation}), band ±${any.k}σ with σ = ${any.sigma_db} dB. Power is a maximum (${any.power_source ?? "none"}), so a quieter transmitter is nearer. `;
   document.getElementById("range-note").textContent = any || aps.size ?
     clientNote + apNote + " Grey rule: distances the model covers. ‹ › an open side the model does not reach." : "";
