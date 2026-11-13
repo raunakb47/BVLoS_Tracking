@@ -664,7 +664,7 @@ function drawRanges() {
   const any = devices[0] && devices[0].newest.client_range;
   const apNote = [...aps].map(([bf, band]) => `AP ${bf.slice(-5)}: ` + (band.power_source === "site_input"
     ? "measured distance (site input)." : band.power_source === "site_fit"
-    ? "distance model fit, assumes the AP transmits like the calibration device." : `${band.model} (${band.recommendation}), power ${band.power_source ?? "none"}.`)).join(" ");
+    ? "distance model fit, assumes it transmits like the calibration device." : `${band.model} (${band.recommendation}), power ${band.power_source ?? "none"}.`)).join(" ");
   const clientNote = !any ? "" : any.power_source === "site_fit"
     ? `Clients: site calibration fit, band ±${any.k}σ with σ = ${any.sigma_db} dB, assumes each client transmits like the calibration device. `
     : `Clients: model ${any.model} (${any.recommendation}), band ±${any.k}σ with σ = ${any.sigma_db} dB. Power is a maximum (${any.power_source ?? "none"}), so a quieter transmitter is nearer. `;

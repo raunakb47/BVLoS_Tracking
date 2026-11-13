@@ -38,12 +38,10 @@ Antenna gains are folded into P_tx: the limits are EIRP.
 Distance model fit (config.env, the default), used ahead of the above when set:
   SITE_RSSI_1M_DBM, SITE_PL_N, SITE_SIGMA_DB, SITE_VALID_M
       a fit of the monitor's RSSI against tape-measured distance for a
-      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). A client is
-      ranged with it, which assumes the client's effective power equals the
-      calibration transmitter's. Only distances inside SITE_VALID_M are given.
-  SITE_FIT_APS
-      1: an AP not in AP_DISTANCE_M is ranged with the same fit (same
-      assumption for the AP); 0: by model as above.
+      calibration transmitter, RSSI = RSSI_1m - 10 n log10(d). Every
+      transmitter, client or AP, is ranged with it, which assumes its
+      effective power equals the calibration transmitter's. Only distances
+      inside SITE_VALID_M are given.
   AP_DISTANCE_M
       measured distance from the monitor to each AP, "bssid=metres;...". An
       AP listed there takes that distance.
@@ -248,7 +246,7 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
                 "near_m": measured, "far_m": measured, "outside": None,
                 "power_dbm": None, "power_source": "site_input"}
     fit = site_fit()
-    if fit is not None and (os.environ.get("SITE_FIT_APS") or "0").strip() == "1":
+    if fit is not None:
         return site_estimate(summary and summary["median_dbm"], fit, k)
     if ap_record.get("tpc_tx_power_dbm") is not None:
         power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
