@@ -11,7 +11,7 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
 * **Per-packet decode.** Standard, Nc, Nr, width, codebook and grouping come from each frame's MIMO Control field, so one capture covers 2x1 to 4x4, Wi-Fi 5 and 6, without configuration. Reports are bucketed by `{transmitter}_{beamformer}_{Nr}x{Nc}@{bw}`.
 * **Append-only logs as the only state.** Each stage writes once and resumes after the last line it processed.
 * **Capability-gated estimators.** MUSIC, SPICE, SAMV-2 and IAA on the BFI covariance (Itahara et al., IEEE Access 2022). Each declares its requirements; Stage 3 records whether it ran and why. Each solves its new reports once they meet its gate, and the others run on the same slice for comparison.
-* **Ranging.** RSSI to a distance band (±kσ) under one selected distance model: a measured fit of RSSI against distance (default) or a published model, ITU-R P.1238-13 / P.1411-13 or 3GPP TR 38.901 InH-Office. Out-of-range readings are flagged, not extrapolated. An AP ranging itself uses the power its TPC Report element states when it sends one. Otherwise transmit power is a stated maximum from the client's Power Capability, the Country element or the host's regulatory domain.
+* **Ranging.** RSSI to a distance band (±kσ) under one selected distance model: a measured fit of RSSI against distance (default) or a published model, IEEE 802.11ax TGax (residential, enterprise), ITU-R P.1238-13 / P.1411-13 or 3GPP TR 38.901 InH-Office. A one-time monitor check (a transmitter held 1 m from the monitor, `monitor_check.py`) gives the published models an effective transmit power in place of a stated maximum. Out-of-range readings are flagged, not extrapolated. An AP ranging itself uses the power its TPC Report element states when it sends one. Otherwise transmit power is a stated maximum from the client's Power Capability, the Country element or the host's regulatory domain.
 * **Geometry from measured angles only.** Without an anchor, bearings stay in the AP's array frame. With the monitor host's associated interface as anchor (`ANCHOR_MAC`), positions are the bearing ray crossing the RSSI ring around the monitor. No world orientation is assumed; both mirror scenes are kept.
 * **Confidence reconciliation.** Each track segment is graded by how many independent estimator groups agree on one direction (1 red, 2 amber, 3 green; dotted on a tie) and revised at most once by a longer covering slice. All rules are set in `config.env`.
 * **Live view.** Local web page: trajectory, bearing track, rays and AP array frame, with range bands and bearing history.
@@ -20,7 +20,7 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
 **Limitations.**
 * Bearings assume a nominal half-wavelength uniform linear array unless `site.json` gives the element positions; every result names which was used.
 * Positions need an anchor. Without one, output is bearing and range only.
-* A fit holds only for the monitor and site it was measured with.
+* A fit holds only for the monitor and site it was measured with. A monitor check holds for its monitor and assumes every transmitter radiates like the check transmitter.
 
 ## 📁 Workflow Structure
 ```text
@@ -42,7 +42,8 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
     ├── dispatch.py                      Stage 3: estimator selection, carry-until-gate
     │                                    slices, bearings with client RSSI
     ├── aoa.py                           AoD estimators and array diagnostics
-    ├── ranging.py                       distance models (fits, ITU-R, 3GPP), transmit power chain
+    ├── ranging.py                       distance models (fits, TGax, ITU-R, 3GPP), transmit power chain
+    ├── monitor_check.py                 one-time monitor check: median RSSI at 1 m for config.env
     ├── locate.py                        Stage 4: range bands, anchor-relative angles,
     │                                    candidate positions
     ├── confidence.py                    Stage 4: confidence reconciliation per segment
@@ -83,7 +84,9 @@ Each setting is documented in the file with its basis. The main ones:
 |---|---|
 | `CAPTURE_INTERFACE`, `CHUNK_TIME` | monitor-mode interface and rotation period in seconds |
 | `LIVE_ESTIMATORS`, `MIN_REPORTS_<NAME>` | estimators on the live path and each one's report-count gate |
-| `PATH_LOSS_MODEL`, `PATH_LOSS_FITS`, `RANGE_SIGMA_K` | distance model, a measured fit or an ITU-R or 3GPP row (default `lab_AlfaAXM`); declared fits; range band width in σ |
+| `PATH_LOSS_MODEL`, `PATH_LOSS_FITS`, `RANGE_SIGMA_K` | distance model, a measured fit or a TGax, ITU-R or 3GPP row (default `lab_AlfaAXM`); declared fits; range band width in σ |
+| `PATH_LOSS_WALLS` | walls between monitor and transmitters, for the TGax rows (default 0) |
+| `MONITOR_CHECK_RSSI_1M_DBM`, `MONITOR_CHECK_FREQ_MHZ` | one-time monitor check from `monitor_check.py`; sets the published models' transmit power (default unset) |
 | `ANCHOR_MAC` | MAC of the monitor host's own associated interface; empty for no anchor |
 | `CONF_GROUPS`, `CONF_TOLERANCE_FACTOR`, `CONF_SUPPORT_DB`, `CONF_REVISION`, `CONF_REVISION_WHEN` | confidence reconciliation |
 | `RENDER_PORT` | port of the live view; empty to not start it |

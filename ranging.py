@@ -12,9 +12,20 @@ Table 7.4.1-1 InH-Office, same form):
 with d the 3D distance in metres. alpha, beta, gamma and sigma are fitted per
 environment and per LoS/NLoS, and each fit holds over a stated distance and
 frequency range (MODELS). PATH_LOSS_MODEL in config.env picks one row of
-MODELS or one fit of PATH_LOSS_FITS.
+MODELS, one row of TGAX or one fit of PATH_LOSS_FITS.
 The 38.901 NLoS loss is max(LoS, NLoS') (LOS_FLOOR), so its inverse is the
 nearer of the two rows' distances.
+
+TGAX rows are the IEEE 802.11ax indoor model (IEEE 802.11-14/0882r4, Sec. 3.1
+and Table III, adopting the TGn models B and D):
+
+    L(d, f) = L_FS(d, f)                               d <= d_BP
+    L(d, f) = L_FS(d_BP, f) + 35 log10(d / d_BP)       d >  d_BP
+    plus m L_iw for m walls (PATH_LOSS_WALLS)
+
+with L_FS the free-space loss. Shadowing sigma is 3 dB up to d_BP and the
+row's NLoS value beyond it. The document gives no distance limit, so a TGax
+range is bounded only below, at 1 m.
 
 Observed loss is L = P_tx - RSSI. Inverting the median gives median_m; the
 band [near_m, far_m] is the median inverted at L -/+ k sigma (RANGE_SIGMA_K).
@@ -35,6 +46,15 @@ Every source is a maximum; a transmitter below it is nearer than reported.
 The source is carried with every range. Absent all four there is no range.
 
 Antenna gains are folded into P_tx: the limits are EIRP.
+
+Monitor check (config.env MONITOR_CHECK_RSSI_1M_DBM, MONITOR_CHECK_FREQ_MHZ):
+  the median RSSI the monitor measures from a transmitter held 1 m away
+  (monitor_check.py). When set, the published models take their power from it
+  instead of the chain above: P_tx = RSSI_1m + L(1 m, f_check), so the selected
+  model reproduces the check reading at 1 m. That one effective power stands
+  for the transmitter's power, its antenna and the monitor's RSSI offset, which
+  the stated maxima leave out; it assumes every transmitter radiates like the
+  check transmitter.
 
 Measured fits (config.env PATH_LOSS_FITS):
   "name: RSSI_1m n sigma low-high; ..." declares fits of the monitor's RSSI
@@ -74,6 +94,16 @@ MODELS = {
     "office_38901_nlos":  ("TR 38.901", 3.83, 17.30, 2.49, 8.03, (0.5, 100.0), (1, 150)),
 }
 
+# IEEE 802.11-14/0882r4 Table III and Sec. 3.1. Fields: source, d_BP (m),
+# sigma up to d_BP, sigma beyond d_BP (dB), wall loss L_iw (dB), f range (GHz),
+# d range (m; no upper limit). Residential is simulation scenario #1 (model B,
+# L_iw 5 dB); enterprise is scenario #2 (model D, L_iw 7 dB). The document's
+# models are for the 2.4 and 5 GHz bands.
+TGAX = {
+    "tgax_residential": ("802.11-14/0882r4", 5.0, 3.0, 4.0, 5.0, (2.4, 5.925), (1, None)),
+    "tgax_enterprise":  ("802.11-14/0882r4", 10.0, 3.0, 5.0, 7.0, (2.4, 5.925), (1, None)),
+}
+
 # NLoS rows whose loss is never below a LoS row's: PL = max(PL_LoS, PL_NLoS').
 LOS_FLOOR = {"office_38901_nlos": "office_38901_los"}
 
@@ -95,10 +125,43 @@ def model_from_env(environ=None):
     fits = fits_from_env(environ)
     if name in fits:
         return name, fits[name]
+    if name in TGAX:
+        return name, TGAX[name]
     if name not in MODELS:
         raise ValueError(f"PATH_LOSS_MODEL={name!r} is not one of "
-                         f"{sorted(MODELS) + sorted(fits)}")
+                         f"{sorted(MODELS) + sorted(TGAX) + sorted(fits)}")
     return name, MODELS[name]
+
+
+def walls_from_env(environ=None):
+    """PATH_LOSS_WALLS: walls between monitor and transmitter, for TGAX rows; 0 when empty."""
+    environ = os.environ if environ is None else environ
+    value = (environ.get("PATH_LOSS_WALLS") or "").strip()
+    if not value:
+        return 0
+    try:
+        walls = int(value)
+    except ValueError:
+        raise ValueError(f"PATH_LOSS_WALLS={value!r} is not a whole number") from None
+    if walls < 0:
+        raise ValueError(f"PATH_LOSS_WALLS={value!r} is negative")
+    return walls
+
+
+def monitor_check_from_env(environ=None):
+    """
+    (RSSI_1m dBm, freq MHz) from MONITOR_CHECK_RSSI_1M_DBM and
+    MONITOR_CHECK_FREQ_MHZ, or None when unset. Raises when only one is set.
+    """
+    environ = os.environ if environ is None else environ
+    rssi = _float_env(environ, "MONITOR_CHECK_RSSI_1M_DBM")
+    freq = _float_env(environ, "MONITOR_CHECK_FREQ_MHZ")
+    if rssi is None and freq is None:
+        return None
+    if rssi is None or freq is None:
+        raise ValueError("MONITOR_CHECK_RSSI_1M_DBM and MONITOR_CHECK_FREQ_MHZ "
+                         "are set together or not at all")
+    return rssi, freq
 
 
 def sigma_k(environ=None):
@@ -178,6 +241,52 @@ def tx_power(freq_mhz, beamformer, ap_records, regdomain, capability_dbm=None):
     return power_ceiling(freq_mhz, beamformer, ap_records, regdomain)
 
 
+def free_space_db(d_m, freq_mhz):
+    """Free-space loss, 20 log10(4 pi d f / c), with f in MHz."""
+    return float(20.0 * np.log10(d_m) + 20.0 * np.log10(freq_mhz) - 27.55)
+
+
+def tgax_loss_db(d_m, freq_mhz, row, walls):
+    """Median loss of a TGAX row at d_m with walls walls."""
+    _, d_bp, _, _, wall_db, _, _ = row
+    loss = free_space_db(min(d_m, d_bp), freq_mhz)
+    if d_m > d_bp:
+        loss += 35.0 * np.log10(d_m / d_bp)
+    return float(loss + walls * wall_db)
+
+
+def tgax_distance_m(loss_db, freq_mhz, row, walls):
+    """Distance at which a TGAX row's median loss equals loss_db."""
+    _, d_bp, _, _, wall_db, _, _ = row
+    excess = loss_db - walls * wall_db
+    at_bp = free_space_db(d_bp, freq_mhz)
+    if excess <= at_bp:
+        return float(10.0 ** ((excess - free_space_db(1.0, freq_mhz)) / 20.0))
+    return float(d_bp * 10.0 ** ((excess - at_bp) / 35.0))
+
+
+def loss_db(d_m, freq_mhz, model_name, walls=0):
+    """Median loss of a MODELS or TGAX row at d_m."""
+    if model_name in TGAX:
+        return tgax_loss_db(d_m, freq_mhz, TGAX[model_name], walls)
+
+    def row_loss(row):
+        _, alpha, beta, gamma, _, _, _ = row
+        return 10.0 * alpha * np.log10(d_m) + beta + 10.0 * gamma * np.log10(freq_mhz / 1000.0)
+
+    loss = row_loss(MODELS[model_name])
+    floor = LOS_FLOOR.get(model_name)
+    if floor is not None:
+        loss = max(loss, row_loss(MODELS[floor]))
+    return float(loss)
+
+
+def check_power(check, model_name):
+    """Effective power from the monitor check: RSSI_1m + L(1 m, f_check), no walls."""
+    rssi_1m, freq = check
+    return float(rssi_1m + loss_db(1.0, freq, model_name))
+
+
 def distance_for_loss_m(loss_db, freq_mhz, model):
     """Distance at which the model's median loss equals loss_db."""
     _, alpha, beta, gamma, _, _, _ = model
@@ -185,8 +294,10 @@ def distance_for_loss_m(loss_db, freq_mhz, model):
     return float(10.0 ** exponent)
 
 
-def _distance_m(loss_db, freq_mhz, model_name):
-    """distance_for_loss_m under MODELS[model_name], with its LOS_FLOOR if any."""
+def _distance_m(loss_db, freq_mhz, model_name, walls=0):
+    """Inverse of loss_db(): a TGAX row, or a MODELS row with its LOS_FLOOR if any."""
+    if model_name in TGAX:
+        return tgax_distance_m(loss_db, freq_mhz, TGAX[model_name], walls)
     d = distance_for_loss_m(loss_db, freq_mhz, MODELS[model_name])
     floor = LOS_FLOOR.get(model_name)
     if floor is not None:
@@ -194,16 +305,20 @@ def _distance_m(loss_db, freq_mhz, model_name):
     return d
 
 
-def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
+def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k, walls=0):
     """
-    Range from one reading under MODELS[model_name]: median_m and the band
-    [near_m, far_m] at -/+ k sigma. A value outside the model's distance range
-    is None; "outside" is "below" or "above" when the median is, "frequency"
-    when freq_mhz is outside the fit, else None. All None when an input is
-    missing.
+    Range from one reading under MODELS[model_name] or TGAX[model_name]:
+    median_m and the band [near_m, far_m] at -/+ k sigma. A value outside the
+    model's distance range is None; "outside" is "below" or "above" when the
+    median is, "frequency" when freq_mhz is outside the fit, else None. All
+    None when an input is missing. A TGAX row's sigma is the one on the
+    median's side of d_BP; walls applies to TGAX rows only.
     """
-    model = MODELS[model_name]
-    recommendation, _, _, _, sigma, (f_low, f_high), (d_low, d_high) = model
+    if model_name in TGAX:
+        recommendation, d_bp, sigma_los, sigma_nlos, _, (f_low, f_high), (d_low, d_high) = TGAX[model_name]
+        sigma = sigma_los
+    else:
+        recommendation, _, _, _, sigma, (f_low, f_high), (d_low, d_high) = MODELS[model_name]
     result = {"model": model_name, "recommendation": recommendation,
               "valid_m": [d_low, d_high], "sigma_db": sigma, "k": k,
               "loss_db": None, "median_m": None, "near_m": None, "far_m": None,
@@ -217,15 +332,18 @@ def estimate(rssi_dbm, power_dbm, freq_mhz, model_name, k):
     result["loss_db"] = loss
 
     def within(d):
-        return d if d_low <= d <= d_high else None
+        return d if d_low <= d and (d_high is None or d <= d_high) else None
 
-    median = _distance_m(loss, freq_mhz, model_name)
+    median = _distance_m(loss, freq_mhz, model_name, walls)
+    if model_name in TGAX and median > d_bp:
+        sigma = sigma_nlos
+        result["sigma_db"] = sigma
     result["median_m"] = within(median)
-    result["near_m"] = within(_distance_m(loss - k * sigma, freq_mhz, model_name))
-    result["far_m"] = within(_distance_m(loss + k * sigma, freq_mhz, model_name))
+    result["near_m"] = within(_distance_m(loss - k * sigma, freq_mhz, model_name, walls))
+    result["far_m"] = within(_distance_m(loss + k * sigma, freq_mhz, model_name, walls))
     if median < d_low:
         result["outside"] = "below"
-    elif median > d_high:
+    elif d_high is not None and median > d_high:
         result["outside"] = "above"
     return result
 
@@ -237,9 +355,14 @@ def client_range(output, facts, ap_records, regdomain, model_name, k):
     if fit is not None:
         return fit_estimate(summary and summary["median_dbm"], fit, k)
     freq = facts.get("centre_freq_mhz")
-    power, source = tx_power(freq, facts["beamformer"], ap_records, regdomain,
-                             facts.get("tx_power_capability_dbm"))
-    return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
+    walls = walls_from_env()
+    check = monitor_check_from_env()
+    if check is not None:
+        power, source = check_power(check, model_name), "monitor_check"
+    else:
+        power, source = tx_power(freq, facts["beamformer"], ap_records, regdomain,
+                                 facts.get("tx_power_capability_dbm"))
+    return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k, walls),
                 power_dbm=power, power_source=source)
 
 
@@ -256,14 +379,17 @@ def ap_range(ap_record, ap_records, regdomain, model_name, k):
     fit = selected_fit()
     if fit is not None:
         return fit_estimate(summary and summary["median_dbm"], fit, k)
-    if ap_record.get("tpc_tx_power_dbm") is not None:
+    walls = walls_from_env()
+    check = monitor_check_from_env()
+    if check is not None:
+        power, source = check_power(check, model_name), "monitor_check"
+    elif ap_record.get("tpc_tx_power_dbm") is not None:
         power, source = float(ap_record["tpc_tx_power_dbm"]), "own_ap_tpc"
-        return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
-                    power_dbm=power, power_source=source)
-    power, source = power_ceiling(freq, ap_record["bssid"],
-                                  [dict(ap_record, beamformers=[ap_record["bssid"]])]
-                                  + list(ap_records), regdomain)
-    return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k),
+    else:
+        power, source = power_ceiling(freq, ap_record["bssid"],
+                                      [dict(ap_record, beamformers=[ap_record["bssid"]])]
+                                      + list(ap_records), regdomain)
+    return dict(estimate(summary and summary["median_dbm"], power, freq, model_name, k, walls),
                 power_dbm=power, power_source=source)
 
 
@@ -292,7 +418,7 @@ def fits_from_env(environ=None):
         except ValueError:
             raise ValueError(f"PATH_LOSS_FITS entry {part!r} is not "
                              "'name: RSSI_1m n sigma low-high'") from None
-        if name in MODELS:
+        if name in MODELS or name in TGAX:
             raise ValueError(f"PATH_LOSS_FITS name {name!r} is a published model's name")
         if fit["n"] <= 0:
             raise ValueError(f"PATH_LOSS_FITS {name!r}: n must be positive")
