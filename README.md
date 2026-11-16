@@ -6,7 +6,7 @@ The core output is the bearing of each client at its AP's antenna array, extract
 
 V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a sibling directory (`WIBFI_DIR` in `config.env`).
 
-## 🚀 Core Features
+## Core features
 * **Continuous pipeline.** Each capture chunk runs extraction (Stage 2), bearings (Stage 3), geometry and confidence (Stage 4); the live view redraws as records are appended.
 * **Per-packet decode.** Standard, Nc, Nr, width, codebook and grouping come from each frame's MIMO Control field, so one capture covers 2x1 to 4x4, Wi-Fi 5 and 6, without configuration. Reports are bucketed by `{transmitter}_{beamformer}_{Nr}x{Nc}@{bw}`.
 * **Append-only logs as the only state.** Each stage writes once and resumes after the last line it processed.
@@ -22,18 +22,18 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
 * Positions need an anchor. Without one, output is bearing and range only.
 * A fit holds only for the monitor and site it was measured with. A monitor check holds for its monitor and assumes every transmitter radiates like the check transmitter.
 
-## 📁 Workflow Structure
+## Layout
 ```text
 /workspace/
 │
-├── Wi-BFI/                          # Submodule: Modified Extraction Engine
+├── Wi-BFI/                          # modified fork, a sibling directory named by WIBFI_DIR
 │   ├── capture_reader.py            # pcap/pcapng reader, radiotap and frame selection
 │   ├── main.py                      # per-packet MIMO Control decode, V reconstruction
 │   ├── vmatrices.py                 # 4x4 to 2x1 Givens Rotation reconstructor
 │   ├── bfi_angles.py                # BFI phase/magnitude dequantizer
 │   └── utils.py
 │
-└── BVLoS_Tracking/                  # Tracking Architecture
+└── BVLoS_Tracking/                  # the framework
     ├── 0_replay_pcap.sh                 offline replay of an existing capture
     ├── 1_Stage1_Capture.sh              monitor-mode capture to rotating pcap chunks
     ├── 2_Stage2_Extraction.sh           per-chunk watcher: Stages 2-4 and the live view
@@ -50,24 +50,24 @@ V-matrix reconstruction is delegated to a modified fork of Wi-BFI, expected as a
     ├── render.py, render.html           live view (local HTTP server and page)
     ├── bench_aoa.py                     synthetic ground-truth bench for aoa.py
     ├── bench_precision.py               estimator precision on captured data
-    ├── config.env                       all settings, each with its basis
-    │
-    └── 4_Stage4_Inference.py            superseded by locate.py and confidence.py,
-                                         kept for reference; does not import
+    └── config.env                       all settings, each with its basis
 ```
 
-## ⚙️ Prerequisites
+A slice, the article's report span, is the run of consecutive reports of one
+bucket that an estimator solves together into one bearing.
+
+## Prerequisites
 Ensure the following system packages and Python libraries are installed before execution:
 * **System Utilities:** `tcpdump`, `iw`, `inotify-tools`, and `wireshark-cli` for `editcap` (offline replay only)
 * **Python Environment:** Python 3 with `numpy`. The live view uses the standard library only.
-* **Hardware:** A network interface card capable of Monitor Mode (e.g., Alfa AWUS036ACS). Recommended dual-antenna Network Interface Card capable of Monitor Mode (e.g., Alfa AWUS036AXM, AWUS036AXML)
+* **Hardware:** a network interface that supports monitor mode at the AP's channel width (for example Alfa AWUS036AXM or AWUS036AXML); two receive chains improve reception of the reports
 
 ```bash
 sudo apt install tcpdump wireshark-cli inotify-tools iw
 pip install numpy
 ```
 
-## ▶️ Quick Start Guide
+## Quick start
 
 ### 1. Monitor Card setup
 Put the interface in monitor mode and lock it to the target channel. The capture
@@ -95,25 +95,25 @@ Standard, MIMO configuration and channel width are decoded per packet, so they
 are not configured here. `SITE_JSON`, when set, gives surveyed array geometry per
 beamformer.
 
-### 3. Launch the Pipeline (Choose Live or Simulation)
-**For Live Physical Capture:**
-Open a dedicated terminal and start the capture daemon to begin writing temporal chunks to storage.
+### 3. Start the capture, live or replayed
+**Live capture.** In its own terminal, start the capture, which writes chunks to `WATCH_DIR`:
 ```bash
 cd BVLoS_Tracking
 sudo ./1_Stage1_Capture.sh
 ```
 
-**For Offline Simulation:**
-Replay an existing capture at real-time rate
+**Replay.** Feed a recorded capture into `WATCH_DIR` at its own pace, so the later stages see it exactly as a live capture:
 ```bash
 cd BVLoS_Tracking
 ./0_replay_pcap.sh  path/to/capture.pcap
 ```
 
-### 4. Initiate the Tracking Daemon
-Open a second terminal window and launch the watcher. On each finalized chunk it
-runs Stage 2 (invoking the `Wi-BFI` extractor as a subprocess), Stage 3 over the
-log, then Stage 4. Outputs land under a per-run session directory:
+### 4. Start the watcher
+In a second terminal, start the watcher. On each finished chunk it runs Stage 2
+(the Wi-BFI extractor as a subprocess), Stage 3 over the log, then Stage 4.
+Outputs land under a per-run session directory, `SESSION_DIR` when set, else
+`./session_<timestamp>`; keep session directories and run records outside the
+repository:
 
 | Path | Content |
 |---|---|

@@ -1,58 +1,33 @@
 #!/bin/bash
 # ==============================================================================
-# Script: 0_replay_pcap.sh
-# Purpose: Simulates a real-time environmental sensing stream by taking a single, 
-#          monolithic PCAP capture and chronologically drip-feeding it into the 
-#          pipeline's watch directory based on the configured CHUNK_TIME.
+# Module: 0_replay_pcap.sh
+# Replay a recorded capture into WATCH_DIR as CHUNK_TIME-second chunks at the
+# capture's own pace, so 2_Stage2_Extraction.sh processes it exactly as it
+# would a live capture from 1_Stage1_Capture.sh.
+# Usage: ./0_replay_pcap.sh <capture.pcap>
 # ==============================================================================
-
-# Ingest global tracking parameters (e.g., CHUNK_TIME)
+set -e
 source ./config.env
 
-# Assign the first command-line argument ($1) to the INPUT_PCAP variable
-INPUT_PCAP=$1
-
-# Sanity check: Ensure the user provided a target file
-if [ -z "$INPUT_PCAP" ]; then
-    echo "[!] Usage Error: Target capture payload undefined."
-    echo "    Syntax: ./0_replay_pcap.sh <historical_capture.pcap>"
+INPUT_PCAP="$1"
+if [[ -z "$INPUT_PCAP" || ! -f "$INPUT_PCAP" ]]; then
+    echo "usage: $0 <capture.pcap>" >&2
     exit 1
 fi
 
-# Define local directories for staging and execution
-WATCH_DIR="./live_chunks"
-TMP_DIR="./tmp_chunks"
+TMP_DIR="$(mktemp -d ./replay_chunks.XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+mkdir -p "$WATCH_DIR"
 
-# Ensure directories exist (-p prevents errors if they are already present)
-mkdir -p $WATCH_DIR $TMP_DIR
+# editcap -i splits the capture on packet timestamps, one file per CHUNK_TIME
+# seconds, numbered in time order.
+editcap -i "$CHUNK_TIME" "$INPUT_PCAP" "$TMP_DIR/chunk.pcap"
 
-echo "[*] Segmenting continuous capture into ${CHUNK_TIME}-second intervals..."
-
-# ------------------------------------------------------------------------------
-# editcap: A Wireshark utility for manipulating libpcap files.
-# -i $CHUNK_TIME : Instructs editcap to split the file based on chronological 
-#                  packet timestamps, creating a new file every X seconds.
-# $INPUT_PCAP    : The source monolithic file.
-# $TMP_DIR/...   : The output prefix. Editcap appends chronological identifiers 
-#                  (e.g., chunk_00000.pcap, chunk_00001.pcap).
-# ------------------------------------------------------------------------------
-editcap -i $CHUNK_TIME "$INPUT_PCAP" $TMP_DIR/chunk.pcap
-
-echo "[*] Initiating real-time simulation pipeline..."
-
-# Iterate through the newly created temporal chunks in alphabetical/chronological order
-for FILE in $TMP_DIR/chunk*.pcap; do
-    
-    # 1. Move the chunk into the live directory. 
-    #    The rename is atomic, so it fires inotifywait's moved_to in
-    #    2_Stage2_Extraction.sh rather than a partial-file close_write.
+for FILE in "$TMP_DIR"/chunk*.pcap; do
+    # An atomic rename into WATCH_DIR fires inotifywait's moved_to in
+    # 2_Stage2_Extraction.sh, never a partial-file close_write.
     mv "$FILE" "$WATCH_DIR/"
-    echo "[+] Pipeline Ingest: $(basename $FILE)"
-    
-    # 2. Suspend execution for exactly the chunk duration. 
-    #    This ensures the pipeline processes historical data at realistic real-time speeds,
-    #    preventing CPU bottlenecking and mimicking live network interface timing.
-    sleep $CHUNK_TIME
+    echo "[*] replayed $(basename "$FILE")"
+    sleep "$CHUNK_TIME"
 done
-
-echo "[*] Simulation payload exhausted."
+echo "[*] replay finished"
