@@ -221,8 +221,8 @@ def applicable(name, spec, facts, min_reports):
                           "subcarrier positions"
         if facts["frequencies_hz"] is None:
             return False, "subcarrier frequencies could not be reconstructed"
-    # MUSIC and ESPRIT need at least one noise eigenvector.
-    if name in ("music", "esprit") and facts["n_antennas"] < 2:
+    # MUSIC needs at least one noise eigenvector.
+    if name == "music" and facts["n_antennas"] < 2:
         return False, "no noise subspace on a single element"
     return True, None
 

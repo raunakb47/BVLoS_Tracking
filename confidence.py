@@ -14,7 +14,7 @@ sets what the revision takes. Segments not yet covered stay
 provisional.
 
 Correlation groups, from how aoa.py computes each estimator:
-  subspace        music, esprit    eigendecomposition of the covariance
+  subspace        music            eigendecomposition of the covariance
   covariance_fit  spice            convex covariance fit, start-independent
   weighted_ls     samv2, iaa       same periodogram start, same R^-1 a update
 Agreement within a group is not independent corroboration, so support is
@@ -71,7 +71,7 @@ import locate
 import ranging
 
 DEFAULTS = {
-    "CONF_GROUPS": "subspace=music,esprit;covariance_fit=spice;weighted_ls=samv2,iaa",
+    "CONF_GROUPS": "subspace=music;covariance_fit=spice;weighted_ls=samv2,iaa",
     "CONF_TOLERANCE_FACTOR": "0.886",
     "CONF_SUPPORT_DB": "3",
     "CONF_REVISION": "corroborate",
