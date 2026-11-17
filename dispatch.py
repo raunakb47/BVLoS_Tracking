@@ -450,9 +450,10 @@ def split_by_format(buckets):
     """
     Split each bucket so that every report in it has the same format.
 
-    A transmitter can be sounded at a bandwidth or grouping other than the one
-    its bucket key names, and reports of different subcarrier counts cannot be
-    stacked. Reports in the format of the bucket's earliest report at the key's
+    The bucket key carries the transmitter, the beamformer, Nr x Nc and the
+    bandwidth, but not the subcarrier grouping or the standard, so reports that
+    share a key can differ in subcarrier count, and those cannot be stacked.
+    Reports in the format of the bucket's earliest report at the key's
     bandwidth keep the bucket's key. Every other format becomes a bucket of its
     own, keyed "<key prefix>@<bw>/<standard>/<nsubc>/ng<ng>", so its reports are
     solved like any other bucket rather than dropped. The earliest report never
