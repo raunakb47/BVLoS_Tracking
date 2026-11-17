@@ -37,7 +37,16 @@ def read_from(path, offset):
         handle.seek(offset)
         chunk = handle.read()
     end = chunk.rfind(b"\n") + 1   # a partly written last line waits
-    records = [json.loads(line) for line in chunk[:end].splitlines() if line.strip()]
+    records = []
+    for line in chunk[:end].splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            # A line cut short when a run was interrupted: skipped, so the
+            # page keeps receiving every complete line after it.
+            print(f"[!] {path}: unreadable line skipped", file=sys.stderr)
     return records, offset + end
 
 
