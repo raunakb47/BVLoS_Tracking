@@ -244,8 +244,22 @@ def locate(solve_path, session_dir, environ=None):
     if os.path.exists(out_path):
         with open(out_path) as handle:
             for line in handle:
-                if line.strip():
+                if not line.strip():
+                    continue
+                try:
                     start_line = max(start_line, json.loads(line)["source_line"] + 1)
+                except (json.JSONDecodeError, KeyError):
+                    # A line cut short when a run was interrupted. Its fix is
+                    # lost; every complete line still counts.
+                    print(f"[!] {out_path}: unreadable line skipped", file=sys.stderr)
+        # Start the next record on its own line after a line that was cut short.
+        with open(out_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    with open(out_path, "a") as tail:
+                        tail.write("\n")
 
     written = 0
     with open(out_path, "a") as handle:

@@ -441,6 +441,41 @@ def ap_record(bssid, beacons, beamformers, pass_index, tag):
     }
 
 
+def _report_format(record):
+    """The fields that fix the shape of a report's V-matrix and its subcarriers."""
+    return tuple(record.get(k) for k in ("standard", "nr", "nc", "bw", "nsubc", "ng"))
+
+
+def split_by_format(buckets):
+    """
+    Split each bucket so that every report in it has the same format.
+
+    The bucket key carries the transmitter, the beamformer, Nr x Nc and the
+    bandwidth, but not the subcarrier grouping or the standard, so reports that
+    share a key can differ in subcarrier count, and those cannot be stacked.
+    Reports in the format of the bucket's earliest report at the key's
+    bandwidth keep the bucket's key. Every other format becomes a bucket of its
+    own, keyed "<key prefix>@<bw>/<standard>/<nsubc>/ng<ng>", so its reports are
+    solved like any other bucket rather than dropped. The earliest report never
+    changes in an append-only log, so a report keeps its bucket from pass to
+    pass.
+    """
+    split = {}
+    for key, records in buckets.items():
+        prefix, _, key_bw = key.rpartition("@")
+        nominal = next((_report_format(r) for r in records if str(r.get("bw")) == key_bw),
+                       None)
+        for record in records:
+            fmt = _report_format(record)
+            if fmt == nominal:
+                split.setdefault(key, []).append(record)
+                continue
+            sub = (f"{prefix}@{record.get('bw')}/{record.get('standard')}/"
+                   f"{record.get('nsubc')}/ng{record.get('ng')}")
+            split.setdefault(sub, []).append(dict(record, bucket=sub))
+    return split
+
+
 def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
           tag=None):
     """
@@ -488,6 +523,7 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
             buckets.setdefault(record["bucket"], []).append(record)
             if latest is None or record["t"] > latest:
                 latest = record["t"]
+    buckets = split_by_format(buckets)
     read_s = time.perf_counter() - mark
 
     out_path = out_path or os.environ.get("SOLVE_OUT") or (log_prefix + ".solve.jsonl")
@@ -532,9 +568,15 @@ def solve(log_prefix, site_path=None, max_reports=None, out_path=None,
             pending = [r for r in buckets[key] if r["t"] > oldest]
             if not pending or max(r["t"] for r in pending) <= seen.get(key, -np.inf):
                 continue
-            facts, results = solve_bucket(pending, log_prefix, site, max_reports,
-                                          gates, live,
-                                          {n: emitted.get(n, -np.inf) for n in live})
+            try:
+                facts, results = solve_bucket(pending, log_prefix, site, max_reports,
+                                              gates, live,
+                                              {n: emitted.get(n, -np.inf) for n in live})
+            except Exception as exc:                  # noqa: BLE001
+                # One bucket that cannot be solved must not stop the others.
+                print(f"[!] bucket {key} not solved: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                continue
             # The client's own maximum transmit power, from its latest
             # (Re)Association Request, for ranging; None when none was heard.
             capability = capabilities.get(facts["transmitter"])
